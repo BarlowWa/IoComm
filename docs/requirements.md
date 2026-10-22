@@ -248,7 +248,7 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | AC-5 | **回调内销毁端点/订阅** 返回 `WOULD_DEADLOCK`，进程不崩溃 | 通过 | FR-6.7 |
 | AC-6 | 回调中调用同步 API 返回 `WOULD_DEADLOCK` | 通过 | FR-6.7 |
 | AC-7 | 组播被禁时，靠单播 seed 仍能发现 | 通过 | FR-2.4 |
-| AC-8 | 慢消费者不拖垮发布者（丢弃 + 计数） | 通过 | FR-4.5 / FR-4.6 |
+| AC-8 | 慢消费者**不阻塞**发布者（丢弃 + 计数）。**不要求**「不影响同端点的其他连接」——共享队列的代价见 [C ABI §6.1](api/c-abi.md) | 通过 | FR-4.5 / FR-4.6 |
 | AC-9 | 进程重启后重新注册，`node_id` 不变、被识别为同一逻辑节点（用 `iocomm_runtime_node_id()` 观测） | 通过 | FR-9.1 / FR-9.2 / FR-9.4 |
 | **AC-10** | 远端连接：A 进程 `connect` B 的端点并收发 | 通过 | FR-4.1 / FR-8.1 |
 | **AC-11** | 重名注册被拒，且三态查询能区分「本进程持有 / 他进程持有」 | 通过 | FR-1.4 / FR-1.5 |
@@ -315,7 +315,7 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | **AC-71** | 多个监控者的**环预留总量**超过全局预算时，`monitor_open` 返回 `RESOURCE_EXHAUSTED`（`runtime_config.monitor_budget_bytes`） | 通过 | FR-10.17 / 9.3 |
 | **AC-71b** | 环 + arena 的预留总量超过全局预算时 `monitor_open` 返回 `RESOURCE_EXHAUSTED`（v1.1 载荷捕获部分） | 通过 | FR-10.17 / 9.3 | 〔v1.1〕 |
 | **AC-72** | 记录离开 `retain_window` 后，其占用的 `max_bytes` 被回收（持续捕获不会因总量口径而提前耗尽） | 通过 | FR-10.4 / 9.3 |
-| **AC-73** | 消息超过 `max_message_size`：同步发送返回 `TOO_LARGE`；异步经 `on_done(TOO_LARGE)` 且不入队；入站超大帧关闭连接并产生 `DROPPED(reason=TOO_LARGE)` | 通过 | FR-4.3 |
+| **AC-73** | **整帧**（`20 + tlv_len + payload_len`）超过 `max_message_size`：同步发送返回 `TOO_LARGE`；异步经 `on_done(TOO_LARGE)` 且不入队；入站超大帧关闭连接并产生 `DROPPED(reason=TOO_LARGE)`。边界用例：payload 恰好使整帧等于上限时**成功**，多 1 字节即失败 | 通过 | FR-4.3 |
 | **AC-74** | `conn_send_async` 带 `ICOMM_SEND_CLOSE_AFTER`：对端收到完整数据后观测到优雅 FIN，发送方 `on_done(OK)` 之后句柄为 `STALE_HANDLE`；对 `endpoint_send*`（扇出）使用该标志返回 `INVALID_ARGUMENT` | 通过 | FR-8.8 / FR-8.9 |
 | **AC-75** | accept 回调内 `conn_send_async` 既未带 `CLOSE_AFTER`、也未先 `conn_retain`/`conn_subscribe` → 返回 `INVALID_STATE`；回调内 `conn_subscribe` 后不 retain，连接保持打开并能持续收数据 | 通过 | FR-8.8 |
 | **AC-76** | 连接上有在途 `send_async` 时调用 `conn_destroy`：每条未完成发送的 `on_done` 恰好触发一次且 `code = CANCELLED`，连接随后关闭，无泄漏（AC-E3 口径） | 通过 | FR-8.9 |
@@ -324,19 +324,24 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | **AC-79** | `iocomm_runtime_node_id()` 返回的值与重启后一致；`runtime_config.node_name` 设置的字符串在 `iocomm_runtime_node_name()` 取回一致，且出现在对端发现快照的 `node_info.name` 中；未配置名字时为空串 | 通过 | FR-9.4 / FR-9.1 |
 | **AC-80** | 同一进程内两个 Runtime 以 `inproc` 建连并双向收发，字节完全一致；接收回调**不在发送者的调用栈上执行**（回调内读取线程 id 校验） | 通过 | FR-3.5 / FR-3.7 |
 | **AC-81** | 同进程内重复 `inproc` 名字 → `ALREADY_EXISTS`；两个进程用同一名字互不可见 | 通过 | FR-3.6 |
-| **AC-82** | inproc 上超 `max_message_size` 的发送返回/回调 `TOO_LARGE`（与 tcp 一致）；`publish_local=1` + `inproc` → `INVALID_ARGUMENT` | 通过 | FR-3.8 / FR-3.9 |
+| **AC-82** | inproc 上**整帧**超 `max_message_size` 的发送返回/回调 `TOO_LARGE`（与 tcp 同口径）；`publish_local=1` + `inproc` → `INVALID_ARGUMENT` | 通过 | FR-3.8 / FR-3.9 |
 | **AC-83** | owned 模式：主线程**从不调用** `run_once` 也能完成一次建连 + 往返收发；IO 线程恒为 1（子进程内枚举线程数验证） | 通过 | FR-6.5 |
 | **AC-84** | `max_handles = 1` 时，第二次 `endpoint_create` 返回 `RESOURCE_EXHAUSTED`（不崩溃、不静默失败） | 通过 | FR-1.7 |
 | **AC-85** | `discovery_lease_ms = 3000`：正常心跳续期只产生一次 `JOINED`；停掉对端后 ≤ lease 产生一次 `LEFT`，且快照中该节点被移除 | 通过 | FR-2.3 |
-| **AC-86** | `FR-5.1` 四条件：建连前 `connected = UNKNOWN`；建连成功后 `connected = TRUE`、`lively = TRUE`；`runtime_reconfigure` 后 `config_current` 由 `FALSE` 变 `TRUE` | 通过 | FR-5.1 |
+| **AC-86** | `FR-5.1` 四条件：建连前 `connected = UNKNOWN`、`healthy = UNKNOWN`；建连成功后 `connected = TRUE`、`lively = TRUE`，且**经历满一个心跳判定周期后** `healthy` 变为 `TRUE`；注入一次 `ERROR` 帧或重连后 `healthy` 变 `FALSE`；`runtime_reconfigure` 后 `config_current` 由 `FALSE` 变 `TRUE` | 通过 | FR-5.1 |
 | **AC-87** | 发现快照：空快照 `count == 0` 且 `get(0)` 返回 `NOT_FOUND`；`index` 越界返回 `NOT_FOUND`；`release` 后再次 `release` 或任意 `get` 返回 `STALE_HANDLE` | 通过 | FR-2.8 |
 | **AC-88** | 对端进程被 `kill -9`：≤ N 秒产生断开事件；随后对端重启并重新 `listen` 同一 pathname socket / 管道名，**无需人工删除残留文件即成功** | 通过 | FR-3.3 / FR-3.4 |
 | **AC-89** | 两进程同时注册同名端点：非 `UNIQUE` 时第二实例 `create` 返回 `CONFLICT`，改名为 `<name>#<pid>` 后成功；`UNIQUE` 时直接拒绝 | 通过 | FR-1.4 / FR-1.5 |
 | **AC-90** | **TLV 前向兼容**：测试用 `FakeTransport` 向接收方注入一帧，帧内带一个 v1 未定义的 tag（如 `0x00FF`，长度非 0）：接收方**正常投递**该消息、payload 与该帧里的一致、连接**不关闭**；同一帧去掉未知 tag 后结果完全相同（对照组）。再把该 tag 的 `len` 改成越界值 → 连接关闭并报帧损坏 | 通过 | [线格式 §3](api/wire-format.md#3-tlv-扩展区) / FR-4.3 |
 | **AC-91** | 一个**未产生 `SENT`** 的报错路径（`TOO_LARGE`、句柄无效）留有环空位：`poll` **取不到任何记录**，`monitor_stats.emitted` 不变；对照组（同样的消息在队列未满时正常发送）产生 `SENT` | 通过 | FR-10.15 / 线格式 §3 |
-| **AC-92** | `HELLO` 握手：① 双方互发 `HELLO` 后连接可用，`DATA` 正常收发；② 未发 `HELLO` 直接发 `DATA` → 对端关闭连接，`DISCONNECTED` 且**不投递**该 `DATA`；③ `min_version` 高于本端 `wire_version` → `HELLO_ACK` 后关闭；④ `HELLO` 的 TLV 区非 0 → 帧损坏，关闭连接 | 通过 | [线格式 §5](api/wire-format.md#5-hello-的-payload) |
+| **AC-92** | `HELLO` 握手：① 双方互发后连接可用；② 未发 `HELLO` 直接发 `DATA` → 关闭且不投递；③ `min_version` 不满足 → `ERROR(VERSION_UNSUPPORTED)` 后关闭；④ `HELLO` 带 TLV → `ERROR(MALFORMED)`；⑤ **接收尺寸协商**：A 配 1 MiB、B 配 64 KiB，A 发 100 KiB → A 侧 `TOO_LARGE`（**不是** `on_done(OK)`）；⑥ 握手超时 → `ERROR(HANDSHAKE_TIMEOUT)` 后关闭 | 通过 | [线格式 §2.1 / §5](api/wire-format.md) |
 | **AC-93** | 发现报文编解码：对端以组播信标上报的节点表，`discovery_snapshot` 里的 `node_id` / `name` / 端点列表与发送端一致；单播 seed 路径与组播路径得到相同结果；未知字段（TLV）被跳过 | 通过 | FR-2.1 / FR-2.4 / [线格式 §8](api/wire-format.md) |
 | **AC-94** | `iocomm_diagnostic_dump` 返回的 JSON：顶层含 `"version"` 与 `"connections"` 数组；每条连接至少含 `conn` / `peer_node_id` / `connected` / `send_queue_depth` / `recv_queue_depth`；`version` 与实际实现一致 | 通过 | FR-5.5 |
+| **AC-95** | 头文件静态检查：导出的每个 `iocomm_*` 函数，其紧邻注释块均含至少一条 `@errors`，且其中列出的码都在 `iocomm_error_code` 内定义。**排除** 6 个无错误通道的函数：`runtime_destroy` / `message_release` / `free_text` / `strerror` / `version_string` / `abi_version` | 通过 | [C ABI §3.2](api/c-abi.md) |
+| **AC-96** | UDP 传输：两个 Runtime 经 UDP 互发有界消息，字节一致；**超过 MTU 的消息返回 `TOO_LARGE`**（不静默分片）；无连接时 `endpoint_send` 返回 `NO_RECEIVER`（v1.1） | 通过 | FR-4.2 | 〔v1.1〕 |
+| **AC-97** | `iocomm_diagnostic_dump` 含 `"errors"` 数组（最近 N 条，容量可配），每条含 `code` / `ts_ns` 与可选 `context`；N 条之后环形覆盖（v1.1） | 通过 | FR-5.5b | 〔v1.1〕 |
+| **AC-98** | 同机两进程共享同一 `node_id`（FR-9.3）：发现表按 `(node_id, process_epoch)` 区分出**两条**记录，各自 `JOINED`；同进程重启后 `process_epoch` 变化而 `node_id` 不变（v1.1） | 通过 | FR-9.3 | 〔v1.1〕 |
+| **AC-99** | 协议级错误帧：对端收到超限帧 / 畸形帧时回 `ERROR(reason, detail)` 再关闭。**接收方的观测面**：① 该连接在途 `on_done` 为 `DISCONNECTED`；② `log_fn` 的 ERROR 级别输出含 `reason` 与 `detail`；③ `iocomm_stats.protocol_errors` 递增 | 通过 | [线格式 §2.1](api/wire-format.md) / NFR-3 |
 
 ### 5.2 平台验收
 
@@ -368,6 +373,8 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | 2026-10-16 | 原始需求提出 |
 | 2026-10-19 | 确认：独立 IO 库 / Rust 核心 / C ABI / x86_64+ARM64 / 排除国产私有架构 |
 | 2026-10-20 | 新增 FR-10 消息级监控；移除 `ICOMM_ENDPOINT_SECRET`（监控改为独立对象） |
+| 2026-10-22 | 同行对比后的修复：**HELLO 增加 `max_frame_bytes` 接收尺寸协商**（两端取较小值，避免「A 报成功、B 断连」）；新增 **`ERROR` 帧**（5 种 reason）+ AC-99；补**握手超时**；修正 TLV 固定开销 40 B → **73 B/帧**；写明共享队列的三条代价（慢 peer 挤占、队头阻塞、AC-8 只保证「不阻塞」）；队列增加 **64 MiB 字节上限**（默认 1024 条 × 1 MiB 最坏是 1 GiB）；定义此前空白的 `Healthy` 条件；统一 `timeout_ms = 0` 的两处歧义 |
+| 2026-10-22 | 两轮独立审计（跨文档一致性 32 条 / 契约完整性 33 条）后的修复：补 §3.1 错误出参通用契约、§3.2 `@errors` 书写规则 + AC-95、§3.3 枚举/配置值合法性、§3.4 `hdr.size` 读写规则；定义 `endpoint_destroy` 完整语义与 Runtime 状态机；把发送队列明确为「端点共享队列 + 队列项携带目标连接」使 AC-76 可实现；定义 `endpoint_send_async` 部分失败与 `send_cancel` 的整组语义；补齐父子对象销毁表、回调内逐 API 的允许/禁止；修正丢弃原因分界（按**策略**而非方向，`QUEUE_FULL` 不再限接收侧）；`PEER_GONE` 分入队前/后两形态；统一 `max_message_size` 的**整帧**口径；修 `capture_set` 的 v1 返回码；配置优先级改为「越具体越优先」；loop 线程记录时机改回「首次确定、stop 前不变」；心跳 payload 补 `hb_ts_ns`；发现报文补 §8.1 寻址/MTU/分页并声明 tag 空间与帧 TLV 独立；AC-91 移 M3；M7 产出补 UDP / 错误环 / `process_epoch` |
 | 2026-10-22 | 收敛复查修复：① SENT 澄清为「已入队 ≠ 已送达」，同步/异步同口径（FR-10.15 / AC-59）；② `QUEUE_FULL`（仅接收侧）与 `BACKPRESSURE`（仅发送侧 ERROR）分界定死，AC-41 按方向拆分；③ `HELLO` 握手补 AC-92（M2）；④ 发现报文补线格式 §8 + AC-93（M4）；⑤ `diagnostic_dump` 定 JSON 键名 + AC-94（M3）；⑥ FR-4.2（UDP）降为 **v1.1**；⑦ `stats.audit_events` 明确 v1 计入 `log_fn` 的 AUDIT 事件；新增 AC-91（入队前失败不产生监控记录） |
 | 2026-10-22 | 新增 AC-90（TLV 未知 tag 跳过的前向兼容验收，归 M2） |
 | 2026-10-22 | 完成任务 C 全部 12 条遗留：FR-3.6 限定语（inproc 隔离只指 `listen_addr`）、FR-5.5 拆分（+FR-5.5b 最后 N 条错误 → v1.1）、FR-9.3 降 v1.1（v1 的 `node_id` 标识 Runtime 实例）、新增 AC-89；新建 `docs/api/wire-format.md`（D-06）；`c-abi.md` §9.0 新增 v1/v1.1 归属表；监控内存模型定稿为「逻辑配额 + 按需分配」；删除 `ICOMM_ENDPOINT_LOCAL`；`max_bytes` 默认值定死 4 MiB；平台矩阵删 MinGW、ARM64 Windows 标为不在产品范围 |

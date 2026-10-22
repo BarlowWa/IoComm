@@ -110,12 +110,12 @@ typedef enum iocomm_error_code {
 
 /* 错误详情：固定缓冲，调用方无需释放。 */
 typedef struct iocomm_error {
-    uint32_t size;               /* 调用方必须预置为 sizeof(iocomm_error) */
+    uint32_t size;               /* 库写入 sizeof(iocomm_error)；调用方**无需预置**（见 §3.1） */
     int32_t  code;               /* iocomm_error_code */
     char     message[256];       /* UTF-8，NUL 结尾 */
 } iocomm_error;
 
-#define ICOMM_ERROR_INIT { sizeof(iocomm_error), 0, {0} }
+#define ICOMM_ERROR_INIT { 0, 0, {0} }   /* 全部置零即可；size 由库写 */
 
 const char* iocomm_strerror(int32_t code);  /* 静态存储期，不要 free */
 ```
@@ -126,6 +126,53 @@ const char* iocomm_strerror(int32_t code);  /* 静态存储期，不要 free */
 - 错误码**只追加**，已有值永不改变。
 - 错误详情走**出参**，不使用跨模块的 thread-local。
 - **函数签名里的错误码一律用 `int32_t`**（返回值与 `iocomm_error.code` 都是），不用 `iocomm_error_code`——它是策略枚举（定宽承载，见 §1）。
+
+### 3.1 错误出参的通用契约（**对全部 `iocomm_error* err` 参数生效**）
+
+| 情形 | 行为 |
+|---|---|
+| 调用返回 `ICOMM_OK` | `err` **不被写入**（调用方不应读取其内容） |
+| 调用返回非 `OK` | `err` **必然被完整填充**：`code` = 返回值、`message` = 非空且 NUL 结尾的 UTF-8（截断到 255 B）、`size` = 库写入的 `sizeof(iocomm_error)` |
+| `err == NULL` | 允许。库**不写**任何内容，只返回错误码；调用方拿不到 `message` |
+| `err != NULL` 但 `err->size < sizeof(iocomm_error)` | **不读取 `size`**（本结构体不做版本协商），按完整结构体写入 |
+| 库捕获到 panic | 返回值 `ICOMM_ERR_INTERNAL`，`message` 含 `"panic"` 前缀 |
+
+> **`size` 字段在 `iocomm_error` 上不做协商**：它是库写、调用方读的输出结构体（§2 首字段规则的例外）。
+> 调用方**不必**预置 `size`；库无条件写完整结构体。
+
+### 3.2 错误码集合的书写规则
+
+每个公开函数**必须**在其头文件注释中以 `@errors` 列出**全部可能返回码**（`ICOMM_OK` 除外），例如：
+
+```c
+ * @errors ICOMM_ERR_INVALID_ARGUMENT  ep == 0 或 cfg 为 NULL
+ * @errors ICOMM_ERR_ALREADY_EXISTS    name 已被占用（同进程或他进程）
+ * @errors ICOMM_ERR_RESOURCE_EXHAUSTED 句柄数已达 max_handles
+```
+
+- **未列入 `@errors` 的码视为实现缺陷**，由 AC-95 静态检查。
+- **豁免**：**没有错误通道**的函数不要求 `@errors`——`iocomm_runtime_destroy`、`iocomm_message_release`、
+  `iocomm_free_text`、`iocomm_strerror`、`iocomm_version_string`、`iocomm_abi_version`。
+  AC-95 的检查范围**排除这六个函数**（见 requirements.md AC-95 正文）。
+- 通用的「句柄无效」路径（`ICOMM_ERR_STALE_HANDLE`）与「参数为 NULL / 0」（`ICOMM_ERR_INVALID_ARGUMENT`）对**所有**接受句柄的函数默认成立，可在注释中统一省略，由本节兜底。
+
+### 3.3 枚举与配置值的合法性
+
+| 输入类别 | 非法值时的行为 |
+|---|---|
+| 定宽整数承载的枚举（`driver_mode` / `overflow_policy` / `direction` / `flags` 等） | 返回 `ICOMM_ERR_INVALID_ARGUMENT`，**不静默截断、不取默认值** |
+| `flags` 中的**未定义位** | 同上：`INVALID_ARGUMENT`（未知位无法安全忽略——它可能改变语义） |
+| 数值字段超出范围（如 `max_message_size` 小于帧头） | `INVALID_ARGUMENT` |
+| 0 值 | 按该字段注释的约定（默认 / 保持 / 关闭 / 无截止），**不是错误** |
+
+### 3.4 结构体尺寸（`hdr.size`）的读写规则
+
+| 方向 | 规则 |
+|---|---|
+| **调用方 → 库**（输入结构体） | `hdr.size < offsetof(末个必填字段)+sizeof` → `ICOMM_ERR_INVALID_ARGUMENT`；`hdr.size` 大于本端 `sizeof` 时**只读本端已知的前缀**，忽略尾部 |
+| **库 → 调用方**（输出结构体，裸 `size` 开头） | 库写入 `sizeof(本端结构体)`；调用方按此值判断可读字段 |
+| `hdr.abi_major != ICOMM_ABI_MAJOR` | `ICOMM_ERR_NOT_SUPPORTED`（不做尽力兼容） |
+| `(hdr.features_required & ~支持的位) != 0` | `ICOMM_ERR_NOT_SUPPORTED`，`message` 列出缺失位的十六进制掩码 |
 
 ---
 
@@ -157,10 +204,10 @@ typedef struct iocomm_runtime_config {
     uint64_t    node_name_len;
 
     /* 默认队列与溢出策略；端点级覆盖见 endpoint_config */
-    uint32_t send_queue_max;       /* 0 = 默认 */
-    uint32_t recv_queue_max;       /* 0 = 默认 */
+    uint32_t send_queue_max;       /* 0 = 默认（1024 条） */
+    uint32_t recv_queue_max;       /* 0 = 默认（1024 条） */
     uint32_t max_message_size;     /* 0 = 默认（1 MiB） */
-    uint32_t max_handles;          /* 句柄上限 */
+    uint32_t max_handles;          /* 0 = 默认（4096）；本 Runtime 内**六类句柄合计**上限 */
 
     /* ICOMM_OVERFLOW_*；0 = DROP_OLDEST（见 §6.1） */
     uint8_t  default_overflow_policy;
@@ -185,6 +232,23 @@ typedef struct iocomm_runtime_config {
 int32_t iocomm_runtime_create(const iocomm_runtime_config* cfg,
                               iocomm_runtime_t* out_rt,
                               iocomm_error* err);
+
+/* ── Runtime 状态机（唯一权威） ──
+ *
+ *   Created ──start()──► Running ──stop()──► Stopped ──destroy()──► (无效)
+ *
+ * | 状态 | 允许的操作 |
+ * |---|---|
+ * | **Created**（create 后、start 前） | 创建端点 / 连接 / 订阅 / 监控者 / 启动发现；消息可入队但**不会发出** |
+ * | **Running** | 全部操作 |
+ * | **Stopped**（stop 后） | 只能 `stop`（幂等）/ `drain` / `destroy` / 只读查询；**其余写操作**返回 `ICOMM_ERR_CLOSED`；句柄仍然有效 |
+ * | 已销毁 | 任意入口返回 `ICOMM_ERR_STALE_HANDLE` |
+ *
+ * - `start` / `stop` 均**幂等**（重复调用返回 `ICOMM_OK`）。
+ * - manual 模式下 `start` 只做状态迁移，**不启动线程**；loop 由 `run_once` 驱动。
+ * - manual 模式下 loop 从未被驱动时，同步 `connect` / `send` 会等满 `timeout_ms` 后返回
+ *   `ICOMM_ERR_TIMEOUT`（它们等的是 loop 推进，不是对端）。
+ * - `destroy` 在任意状态可用；销毁后所有句柄失效。 */
 
 /* ── 控制面 ── */
 
@@ -262,13 +326,15 @@ const iocomm_abi_header* iocomm_abi_version(void);
 
 ### 5.0 配置优先级（**唯一的权威定义**）
 
-同一个通信参数出现在多个结构体里时，按以下优先级**后者覆盖前者**：
+同一个通信参数出现在多个结构体里时，按以下优先级生效。**总规则：越具体的作用域优先**
+（端点级 > runtime 默认），运行期 `tune_config` 是**作用域最宽的覆盖**：
+它作用于「未被端点级显式设置」的全部端点。
 
 | 参数 | 创建期（runtime_config） | 端点级（endpoint_config） | 运行期热更新（tune_config） | 作用域 |
 |---|---|---|---|---|
-| `send_queue_max` / `recv_queue_max` | ✅ 默认值 | ✅ `queue_limit` 覆盖 | ✅ 覆盖全部端点 | runtime → 端点 → 热更新 |
-| `overflow_policy` | ✅ `default_overflow_policy` | ✅ `overflow_policy` 覆盖 | ✅ 覆盖全部端点 | runtime → 端点 → 热更新 |
-| `max_message_size` | ✅ 默认值 | — | ✅ | runtime → 热更新 |
+| `send_queue_max` / `recv_queue_max` | ✅ 默认值 | ✅ `queue_limit` 覆盖 | ✅ 只改**未被子端点级显式设置**的端点 | 端点级 > tune |
+| `overflow_policy` | ✅ `default_overflow_policy` | ✅ `overflow_policy` 覆盖 | ✅ 只改**未被端点级显式设置**的端点 | 端点级 > tune |
+| `max_message_size` | ✅ 默认值 | — | ✅ 全部端点 | runtime → tune |
 | `max_handles` | ✅ 仅创建期 | — | ❌ | 不可热更新 |
 | `heartbeat_ms` / `heartbeat_miss_limit` | — | — | ✅ 仅运行期 | 热更新 |
 | `iface_index` | — | ✅ 作用：**端点监听 + 该端点的发送/组播** | ✅ 作用：**全部端点 + 发现** | 见下 |
@@ -296,7 +362,7 @@ typedef struct iocomm_endpoint_config {
     uint64_t    listen_addr_len;
 
     uint32_t flags;              /* ICOMM_ENDPOINT_* */
-    uint32_t queue_limit;        /* 0 = 默认 */
+    uint32_t queue_limit;        /* 0 = 用 runtime 默认；同时作用于该端点的发送与接收队列 */
 
     uint32_t iface_index;        /* 0 = 自动；否则只在该网卡监听/发送 */
     uint8_t  overflow_policy;    /* ICOMM_OVERFLOW_*；0 = 用 runtime 默认 */
@@ -315,6 +381,25 @@ int32_t iocomm_endpoint_create(iocomm_runtime_t rt,
                                iocomm_endpoint_t* out_ep,
                                iocomm_error* err);
 
+/* 销毁本地端点。语义完整定义如下（此前为空缺）：
+ *  1. **名字锁**：立即释放跨进程名字锁（§architecture 6.4），其他进程可马上注册同名端点；
+ *     本 Runtime 内同名端点也可立即重建。
+ *  2. **入站连接**：全部以 FIN 优雅关闭（不是 RST）；这些连接上的订阅失效，
+ *     未取走的消息丢弃。正在执行的 `accept` 回调会先跑完，之后不再触发。
+ *  3. **出站连接**（`ep_owner == ep` 的连接）：**转为独立队列后继续存活**。销毁时把它们的未发项
+ *     迁入各自的连接队列（容量取 runtime 默认），之后走 `conn_send` 点对点发送；
+ *     它们不再计入本端点扇出与 `conn_count(ep)`。要一并关闭请先 `conn_destroy`。
+ *     迁移是**原子**完成的，调用方无感知，不会出现「有连接无队列」的中间态。
+ *  4. **在途异步发送**：该端点扇出的 `endpoint_send_async` **按 op_id 整组取消**
+ *     （与 `send_cancel` 同口径，见 §6.2）：每组 `on_done(code = ICOMM_ERR_CANCELLED)` 恰好一次。
+ *     已迁到独立队列的出站连接项**不取消**。
+ *  5. **阻塞中的同步发送**（`BLOCK` 策略，§6.1）：被唤醒并返回 `ICOMM_ERR_CLOSED`。
+ *  6. **订阅 / 监控者**：挂在**本端点**上的订阅与监控者一并回收（等同 unsubscribe / monitor_close，
+ *     但**不产生**审计事件）。连接到它们的回调不再触发。
+ *  7. **发送队列**：剩余消息丢弃，逐条产生 `DROPPED(PEER_GONE)`（若有监控者）。
+ *  8. 函数返回后句柄立即失效；重复调用返回 `STALE_HANDLE`。
+ *  **不阻塞**；线程要求与 `conn_destroy` 相同——任意线程可调用，但同一对象的创建/销毁
+ *  由调用方串行化（架构 §3.3）。 */
 int32_t iocomm_endpoint_destroy(iocomm_runtime_t rt, iocomm_endpoint_t ep,
                                 iocomm_error* err);
 
@@ -447,10 +532,22 @@ int32_t iocomm_conn_retain(iocomm_runtime_t rt, iocomm_conn_t conn,
                            iocomm_error* err);
 
 /* 立即关闭一条连接（入站或出站均可）。
+ * **子对象随父对象销毁（总表）**：
+ *
+ * | 销毁 | 受影响 | 不受影响 |
+ * |---|---|---|
+ * | Runtime | 全部（端点 / 连接 / 订阅 / 监控者 / 快照），逐条 `on_done(CANCELLED)` | — |
+ * | endpoint | 挂在它上面的订阅 / 监控者 / **入站连接**（FIN）；名字锁释放 | 出站连接（`ep_owner == ep` 的仍存活，只是不再计入扇出） |
+ * | conn | 该连接上的订阅、接收队列剩余消息、在途异步发送 | 端点、其他连接 |
+ * | subscription | 只是停止回调；**已入队的消息保留在端点/连接的接收队列里** | 端点、连接、消息 |
+ * | monitor | 环与 arena 释放（v1.1）；之后的 `poll` 返回 `CLOSED` | 被监控的连接/端点 |
+ *
+ * 每条的详细语义见各函数注释；本表只给「谁受谁影响」。
+ *
  * **在途异步发送一律取消**：每条未完成的 send_async 仍恰好触发一次
  * on_done(code = ICOMM_ERR_CANCELLED)（与 AC-27 的 Runtime 销毁路径一致）。
  * 发送缓冲中尚未交给传输层的数据直接丢弃；随后以 FIN 关闭。
- * 不阻塞、任意线程可调用。重复调用返回 STALE_HANDLE。
+ * 不阻塞；任意线程可调用（同一连接的创建/销毁由调用方串行化，架构 §3.3）。重复调用返回 STALE_HANDLE。
  * 「先把缓冲 flush 出去再关」用 conn_close_graceful；
  * 「发完这一条就关」用 ICOMM_SEND_CLOSE_AFTER；
  * 「异常中止」用 conn_abort。 */
@@ -503,10 +600,47 @@ int32_t  iocomm_conn_get  (iocomm_runtime_t rt, iocomm_endpoint_t ep,
 
 ## 6. 发送与接收
 
+### 6.0 队列与句柄的默认值（**唯一权威**）
+
+| 参数 | 默认 | 单位 | 说明 |
+|---|---|---|---|
+| `send_queue_max` | **1024** | 条 | 每个端点的发送队列上限 |
+| `recv_queue_max` | **1024** | 条 | 每个端点的接收队列上限 |
+| `max_message_size` | **1 MiB** | 字节 | 见 §9.3；**上限 64 MiB**（超过则单条消息永远进不了队列） |
+| `max_handles` | **4096** | 个 | 本 Runtime 内**六类句柄合计**，**不含 Runtime 自身** |
+
+- 队列上限**同时**受条数与字节约束：条数 ≤ `queue_max`，字节总量 ≤ `min(queue_max × max_message_size, 64 MiB)`。
+- `max_message_size > 64 MiB` → `runtime_create` 返回 `INVALID_ARGUMENT`（否则单条消息永远进不了队列）。
+- **字节上限**：`runtime_config` **不提供独立字段**（避免多一个旋钮）。超过字节上限时按该端点策略处理（与条数满同口径）。
+- 默认值下：条数上限 1024 条，字节上限 64 MiB 每队列。最坏情况（消息都是 1 MiB）是 **64 条即满**，而不是 1024 条。
+- 句柄超限：`endpoint_create` / `connect*` / `subscribe` / `conn_subscribe` / `discovery_snapshot_take` / `monitor_open` 一律返回 `ICOMM_ERR_RESOURCE_EXHAUSTED`。
+- **每个 Runtime 有独立的句柄表与计数**（AC-80 允许多个 Runtime 并存）。
+
 ### 6.1 溢出策略（每端点一个队列）
 
 ```c
-/* 一个端点 = 一条发送队列 + 一条接收队列 + 一个策略（ADR-002）。
+/*
+ * **队列归属规则（唯一口径）**：
+ *   - 归属端点的连接（`ep_owner == ep`）共用该端点的**一条发送队列**——这是 FR-4.6 的有界资源，
+ *     容量 `send_queue_max` **条**，且字节总量 ≤ **64 MiB**（§6.0；与连接数无关）；
+ *   - **每个队列项都携带目标连接句柄**（`conn_send` 填该连接；`endpoint_send` 扇出时为 N 个独立项）；
+ *   - 不归属任何端点的连接（`ep_owner == 0`）各自有一条队列，容量取 runtime 默认；
+ *   - 接收方向：端点一条接收队列，连接一条接收队列（同样带归属）；
+ *   - 溢出策略按端点取一个值，作用于该端点队列及其连接队列（ADR-002）。
+ *
+ * **`conn_destroy` 如何精确取消**：扫描该连接所属队列，摘除 `target == conn` 的项。
+ * 因此「每条未完成的 send_async 恰好触发一次 CANCELLED」（AC-76）可实现，且代价只与队列长度相关。
+ *
+ * **代价一：慢 peer 挤占共享容量**（与 ZeroMQ 的 per-peer HWM 相反，属有意取舍）。
+ * 一条连接写不动时，它的项会占住共享队列，`DROP_OLDEST` 可能丢掉**发给其他连接**的消息。
+ * 这与 FR-4「慢消费者不阻塞发布者」一致，但**不等价于**「不影响其他连接」。
+ * 需要几何隔离时把它们拆成不同端点；严格 per-peer 隔离不在 v1 范围。
+ *
+ * **代价二：队头阻塞**。队列严格 FIFO、不分连接轮转——队头项所属连接写不动时，
+ * 后续项**不会**跳过（跳过会破坏同一连接内的顺序，而顺序是 per-source `sequence` 的前提）。
+ * 这是共享队列模型的必然结果，不是实现缺陷。
+ *
+ * 一个端点 = 一条发送队列 + 一条接收队列 + 一个策略（ADR-002）。
  * 「过程数据 / 报警 / 命令」需要不同策略时，用**三个端点**表达。
  * 枚举从 1 开始：0 表示「用默认 / 保持当前值」，zero-init 不会静默变成 BLOCK。
  * 值在 ABI 上由 uint8_t 承载（见 §1），枚举本身只提供符号名。 */
@@ -534,9 +668,10 @@ int32_t iocomm_endpoint_set_overflow(iocomm_runtime_t rt, iocomm_endpoint_t ep,
 > **接收侧**共用同一端点的策略；`BLOCK` 永不生效，`ERROR` 的语义固定为「丢弃 + 计数 + 产生
 > `DROPPED(reason = QUEUE_FULL)`」，**不关闭连接**（接收侧没有可返回失败的调用方）。
 >
-> **两个 reason 的分界（唯一口径）**：**接收队列满 → `QUEUE_FULL`**（无论策略是丢弃还是 ERROR）；
-> **发送队列满且策略为 ERROR → `BACKPRESSURE`**。两者不重叠：`QUEUE_FULL` 只出现在接收侧，
-> `BACKPRESSURE` 只出现在发送侧。
+> **两个 reason 的分界（唯一口径）**：分界依据是**策略**，不是方向。
+> - 队列满 + `DROP_OLDEST` / `DROP_NEWEST` → 消息**曾被接受又丢弃** → `QUEUE_FULL`（发送侧、接收侧都适用）
+> - 队列满 + `ERROR` → 消息**未被接受** → `BACKPRESSURE`；接收侧没有可返回失败的调用方，
+>   按 §6.1 固定为「丢弃 + 计数 + `DROPPED(QUEUE_FULL)`」，因此 `BACKPRESSURE` 实际只出现在发送侧。
 >
 > **扇出的部分失败**：`iocomm_endpoint_send` 若只有部分连接入队成功，**返回 `ICOMM_OK`**，
 > 由 `out_delivered < N` 表达部分成功；若全部失败则返回 `ICOMM_ERR_WOULD_BLOCK`。
@@ -551,7 +686,8 @@ typedef struct iocomm_send_options {
     uint8_t  reserved8[7];
     uint64_t correlation_id;     /* 可选，0 = 无 */
     /* 排队超时（**仅异步发送**）：从入队成功到开始写传输层的上限。
-     * 0 = 无截止（默认）。开始写之后不再受此超时约束——
+     * 0 = 无截止（默认；**异步特有**，与同步 `timeout_ms` 的 0 义不同，见 §6.2b）。
+     * 开始写之后不再受此超时约束——
      * 字节流中途截断只能 RST 掉整条连接，那属于 conn_abort 的职责。
      * 超时 → 消息出队 → on_done(ICOMM_ERR_TIMEOUT) + DROPPED(TIMEOUT)。
      * 同步发送的截止时间由函数参数 timeout_ms 给出，本字段被忽略。 */
@@ -580,7 +716,17 @@ int32_t iocomm_conn_send_async(iocomm_runtime_t rt, iocomm_conn_t conn,
                                void* user, uint64_t* out_op_id,
                                iocomm_error* err);
 
-/* 异步扇出到一个本地端点当前的所有连接。无连接时以 NO_RECEIVER 回调。 */
+/* 异步扇出到一个本地端点当前的所有连接。
+ * 无连接时：on_done(code = ICOMM_ERR_NO_RECEIVER)，且若该端点有监控者，
+ * 产生一条 DROPPED(NO_SUBSCRIBER)（FR-10.3 的 no_subscriber 原因）。
+ * 码与记录是同一事件的两种视图，不互相替代。
+ *
+ * **部分失败**：`on_done` 只有单个 `code`，无法表达「7 条成功 3 条失败」。因此：
+ *   - `code = ICOMM_OK` ⇔ **全部**目标连接都成功入队；
+ *   - `code = ICOMM_ERR_WOULD_BLOCK` ⇔ **全部**失败（部分失败不会报这个码）；
+ *   - 部分失败报 `ICOMM_OK` + 通过 `iocomm_stats.queue_dropped` 反映丢失数；
+ *   - 需要逐连接结果时用 **`conn_send_async` 逐条发**，或用监控环的 `DROPPED` 记录。
+ * 这与同步版（`out_delivered < N`）的信息量**不等价**——这是异步扇出的已知取舍。 */
 int32_t iocomm_endpoint_send_async(iocomm_runtime_t rt, iocomm_endpoint_t ep,
                                    const iocomm_send_options* opt,
                                    iocomm_slice payload,
@@ -589,7 +735,10 @@ int32_t iocomm_endpoint_send_async(iocomm_runtime_t rt, iocomm_endpoint_t ep,
                                    void* user, uint64_t* out_op_id,
                                    iocomm_error* err);
 
-/* 取消一个未完成的异步发送。on_done 仍会被调用一次，code = CANCELLED。 */
+/* 取消一个未完成的异步发送。on_done 仍会被调用一次，code = CANCELLED。
+ * `op_id` 对 `conn_send_async` 是「一条消息」；对 `endpoint_send_async` 是**整组**：
+ * 取消会移除该组中尚未开始写的全部队列项，`on_done` 仍只触发**一次**（整组计）。
+ * 已经开始写的项不取消（与排队超时同口径，见 §6.2b）。 */
 int32_t iocomm_send_cancel(iocomm_runtime_t rt, uint64_t op_id,
                            iocomm_error* err);
 
@@ -692,11 +841,21 @@ void iocomm_message_release(iocomm_message* msg);
 
 ```
 @thread  在 Runtime 的事件循环线程上调用（不是调用方线程）。
-         每次回调前 Runtime 会记录当前线程为 loop 线程，供同步入口检测。
+         loop 线程 ID 在**首次 `run_once`（manual）/ 启动 IO 线程（owned）时确定，`stop` 前不变**；
+         同步入口据此判别 `WOULD_DEADLOCK`（见 [架构 §3.3](../architecture.md)）。
 @lifetime 回调参数中的指针/切片只在本次回调期间有效
          （例外：明确标注「静态存储期」的字符串可长期缓存）。
-@forbid  回调内禁止：阻塞、销毁 Runtime/端点、销毁**非本回调交付的**连接/订阅
-         （违反返回 ICOMM_ERR_WOULD_DEADLOCK，而不是死锁）
+@forbid  阻塞；runtime_destroy / endpoint_destroy / runtime_stop / runtime_drain；
+         销毁**非本回调交付的**连接/订阅。
+         违反一律返回 ICOMM_ERR_WOULD_DEADLOCK，**而不是死锁**。
+@special 以下调用**允许**，但语义特殊：
+         - `unsubscribe(本订阅)`         → ICOMM_OK；本次回调跑完后不再触发
+         - `conn_destroy(本回调的 conn)` → ICOMM_OK（accept 回调内为拒绝；订阅回调内为关闭）
+         - `send_cancel`                 → 允许；取消自己的回调可能再触发一次 on_done
+         - `monitor_close`               → 允许（监控回调不存在，故仅 on_done 场景）
+         - `discovery_stop`              → 允许；本次 discovery 回调跑完后停止
+         - `runtime_wakeup`              → 允许
+         - 任何**异步**发送 / 连接            → 允许（内部投递到 loop）
 @except  `iocomm_accept_fn` 的 inbound 句柄**可以**在回调内 conn_destroy
          （用于拒绝入站连接），不返回 WOULD_DEADLOCK
 @allow   回调内允许：读取快照、发起异步操作、创建新的端点/连接
@@ -813,7 +972,7 @@ typedef struct iocomm_peer_status {
     /* 条件集（FR-5.1）：值为 iocomm_condition_status */
     uint8_t connected;
     uint8_t lively;
-    uint8_t healthy;
+    uint8_t healthy;             /* 最近一个判定窗口内无重连 / 无协议错误；见架构 §5.2b */
     uint8_t config_current;
     uint32_t reserved1;
 
@@ -849,6 +1008,7 @@ typedef struct iocomm_stats {
     uint64_t retransmits;          /* TCP 层重传（可读时）；否则 0 */
     uint64_t heartbeat_timeouts;
     uint64_t reconnects;
+    uint64_t protocol_errors;      /* 收到 ERROR 帧或判定帧损坏的次数（v1） */
     uint64_t audit_events;         /* 已送交 audit_fn（v1：已写 log_fn 的 AUDIT 类别）的事件数 */
 
     int64_t  send_queue_depth, recv_queue_depth;
@@ -918,11 +1078,11 @@ typedef enum iocomm_mon_kind {
 
 typedef enum iocomm_drop_reason {
     ICOMM_DROP_NONE          = 0,  /* 非 DROPPED 记录使用（`kind != DROPPED` 时 drop_reason 恒为 0） */
-    ICOMM_DROP_QUEUE_FULL    = 1,  /* 本端接收队列满（策略为丢弃，或接收侧 ERROR） */
+    ICOMM_DROP_QUEUE_FULL    = 1,  /* 队列满且策略为 DROP_OLDEST / DROP_NEWEST → **被策略丢弃**（发送侧或接收侧） */
     ICOMM_DROP_NO_SUBSCRIBER = 2,  /* 端点扇出时无已建立连接 */
     ICOMM_DROP_TIMEOUT       = 3,  /* 异步发送排队超过 send_options.queue_timeout_ms */
     ICOMM_DROP_PEER_GONE     = 4,  /* 连接已断开时仍有待发消息 */
-    ICOMM_DROP_BACKPRESSURE  = 5,  /* **发送侧**队列满且策略为 ERROR（消息未入队，被拒） */
+    ICOMM_DROP_BACKPRESSURE  = 5,  /* 队列满且策略为 ERROR → **入队前被拒绝**（发送侧；接收侧无返回方，见 §6.1） */
     ICOMM_DROP_TOO_LARGE     = 6,  /* 帧超过 max_message_size（入站关闭连接） */
 } iocomm_drop_reason;
 ```
@@ -992,7 +1152,7 @@ typedef struct iocomm_mon_record {
 
 ```c
 /* 〔v1.1〕载荷捕获相关字段（max_payload_bytes 及以下四项）在 v1 中恒按「捕获关闭」处理：
- * 即使传入非 0 也视为 0，且 capture_set 一律返回 INVALID_STATE。 */
+ * 即使传入非 0 也视为 0。`iocomm_monitor_capture_set` 在 v1 下恒返回 `NOT_SUPPORTED`（§9.0）。 */
 typedef struct iocomm_monitor_config {
     iocomm_abi_header hdr;
 
@@ -1056,22 +1216,31 @@ typedef struct iocomm_monitor_config {
 > **`max_total_bytes` 不受预算限制**：它是累计配额，可在远大于工作集时配置（如 512 MiB），
 > 达到后按 §9.4 的 `RESOURCE_EXHAUSTED` 规则停止捕获。
 >
-> **消息尺寸上限**：`max_message_size`（默认 1 MiB）在发送侧**先于入队**检查——
+> **消息尺寸上限**：`max_message_size`（默认 1 MiB）约束**整帧**——`20 + tlv_len + payload_len`
+> （见 [线格式 §1](wire-format.md)），即**发送方可见的 payload 上限比该值小约 20–80 B**。
+> 在发送侧**先于入队**检查——
 > 同步 `conn_send` / `endpoint_send` 返回 `TOO_LARGE`；异步经 `on_done(code=TOO_LARGE)`，**不入队**。
 > 接收侧超限：关闭该连接（`DISCONNECTED`）并产生一条 `DROPPED(reason=TOO_LARGE)` 记录。
 > **发送侧超限不产生 DROPPED**（消息从未入队，只返回错误码）。
 >
 > **入队前失败是否产生监控记录（唯一口径）**：
 >
-> | 入队前失败的原因 | `SENT` | `DROPPED` |
+> | 情形 | `SENT` | `DROPPED` |
 > |---|---|---|
-> | **发送队列满且策略为 `ERROR`** | ❌ 不产生 | ✅ `DROPPED(BACKPRESSURE)` |
+> | 发送队列满且策略为 `ERROR` | ❌ | ✅ `BACKPRESSURE` |
+> | 扇出时**无连接** | ❌ | ✅ `NO_SUBSCRIBER` |
+> | 连接在**入队前**已断开 | ❌ | ✅ `PEER_GONE` |
 > | `TOO_LARGE`（超过 `max_message_size`） | ❌ | ❌（编程错误，不是运行期事件） |
 > | 句柄无效 / 参数非法 / 未持有连接 | ❌ | ❌ |
 >
-> 理由：队列满**是运行期背压事件**，正是监控要回答的「命令为什么没发出去」；其余是调用方的编程错误，
+> 前三行是**运行期事件**，正是监控要回答的「这条消息为什么没发出去」；后两行是调用方的编程错误，
 > 只走返回值 / `on_done`，不进监控环（否则误用会污染监控）。
-> **同步与异步在这一点上完全一致**——异步被拒同样不产生 `SENT`，同样产生 `BACKPRESSURE`。
+> **同步与异步在这一点上完全一致**——异步被拒同样不产生 `SENT`，同样产生对应的 `DROPPED`。
+>
+> **`PEER_GONE` 的两种形态**（二者语义不同，都应实现）：
+> - 入队**前**已知连接已断开 → 入队失败，返回 `DISCONNECTED`，产生 `DROPPED(PEER_GONE)`；
+> - 消息已**入队**（已产生 `SENT`）后连接断开 → 队列清空，逐条产生 `DROPPED(PEER_GONE)`，
+>   异步的 `on_done(code = ICOMM_ERR_DISCONNECTED)`。
 >
 > 已产生 `SENT` 的消息，其后续结局是 `DROPPED(TIMEOUT / PEER_GONE)`、`DELIVERED` 或取消——
 > **`SENT` 之后出现 `DROPPED` 是正常序列**（SENT = 已入队，不是「已送达」）。

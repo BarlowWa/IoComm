@@ -252,7 +252,7 @@ NodeId = u64
 |---|---|
 | `Connected` | True / False / Unknown |
 | `Lively` | True / False / Unknown |
-| `Healthy` | True / False / Unknown |
+| `Healthy` | True / False / Unknown —— **定义**：最近一次心跳判定周期（`heartbeat_ms × max(heartbeat_miss_limit,1)`，默认 3 个心跳周期）内既**没有重连**、也**没有收到 `ERROR` 帧**；`Unknown` = 该连接尚未经历满一个周期 |
 | `ConfigCurrent` | True / False |
 
 上层按需查询，新增条件不破坏既有判断。**状态变化通过 `iocomm_condition_fn` 回调推送**（见 C ABI §8），同时保留拉取式查询。
@@ -434,14 +434,14 @@ enum ErrorCode {
 
 | # | 里程碑 | 产出 | 验收 |
 |---|---|---|---|
-| **M0** | 骨架 | C ABI 头（C99 可编译）+ crate 划分 + CI 三平台构建 | AC-P1 / AC-P5 / AC-18 / AC-24 / AC-35 |
+| **M0** | 骨架 | C ABI 头（C99 可编译）+ crate 划分 + CI 三平台构建 | AC-P1 / AC-P5 / AC-18 / AC-24 / AC-35 / AC-95 |
 | **M1** | inproc 闭环 | 句柄表（代际）+ Runtime + 端点/连接模型 + **跨进程名字表（§6.4）** + `inproc` 传输（FR-3.5–3.10） | AC-4 / AC-11 / AC-25 / AC-32 / AC-33 / AC-36 / AC-40 / AC-80 / AC-81 / AC-82 / AC-83 / AC-84 / AC-89 |
-| **M2** | TCP + 双向 | tcp 传输 + accept + connect + send/recv/subscribe + 异步排队超时 + **[线格式](api/wire-format.md)（含 HELLO 握手）** | AC-1 / AC-2 / AC-10 / AC-29 / AC-30 / AC-31 / AC-33b / AC-39 / AC-73 / AC-74 / AC-75 / AC-76 / AC-77 / AC-78 / AC-90 / AC-91 / AC-92 |
-| **M3** | 状态与监控 | 心跳 + 条件集 + 指标 + 诊断（JSON 结构见 AC-94）+ **消息监控（信封级）** | AC-3 / AC-5 / AC-6 / AC-12 / AC-13 / AC-15 / AC-20 / AC-27 / AC-28 / AC-37 / AC-41 / AC-42 / AC-43 / AC-44 / AC-45 / AC-53 / AC-55 / AC-57 / AC-58 / AC-59 / AC-64 / AC-68 / AC-71 / AC-72 / AC-86 / AC-94 |
+| **M2** | TCP + 双向 | tcp 传输 + accept + connect + send/recv/subscribe + 异步排队超时 + **[线格式](api/wire-format.md)（含 HELLO 握手）** | AC-1 / AC-2 / AC-10 / AC-29 / AC-30 / AC-31 / AC-33b / AC-39 / AC-73 / AC-74 / AC-75 / AC-76 / AC-77 / AC-78 / AC-90 / AC-92 / AC-99 |
+| **M3** | 状态与监控 | 心跳 + 条件集 + 指标 + 诊断（JSON 结构见 AC-94）+ **消息监控（信封级）** | AC-3 / AC-5 / AC-6 / AC-12 / AC-13 / AC-15 / AC-20 / AC-27 / AC-28 / AC-37 / AC-41 / AC-42 / AC-43 / AC-44 / AC-45 / AC-53 / AC-55 / AC-57 / AC-58 / AC-59 / AC-64 / AC-68 / AC-71 / AC-72 / AC-86 / AC-91 / AC-94 |
 | **M4** | 发现 | 组播 + 单播 seed + 节点身份 + 阶段二端点能力 + **[发现线格式](api/wire-format.md#8-发现报文阶段一--阶段二)** | AC-7 / AC-9 / AC-14 / AC-16 / AC-21 / AC-22 / AC-23 / AC-34 / AC-38 / AC-79 / AC-85 / AC-87 / AC-93 |
 | **M5** | 本机 IPC | Linux unix socket + Windows 命名管道 | AC-P3 / AC-8 / AC-17 / AC-19 / AC-26 / AC-88 |
 | **M6** | 平台与加固 | 麒麟/UOS 实机 + glibc 2.17 基线 + soak | AC-P1 / AC-P2 / AC-P3 / AC-P4 / AC-P5 / AC-E1 / AC-E2 / AC-E3 / AC-E4 / AC-E5 / AC-E6 |
-| **M7** | **v1.1** 载荷捕获与审计 | arena / 限速 / 双 TTL / dump / 审计 sink 回调（`audit_fn`）/ SLOW | AC-46 / AC-47 / AC-48 / AC-49 / AC-50 / AC-51 / AC-52 / AC-54 / AC-56 / AC-60 / AC-61 / AC-62 / AC-63 / AC-65 / AC-67 / AC-69 / AC-70 / AC-71b |
+| **M7** | **v1.1** 载荷捕获与审计 | arena / 限速 / 双 TTL / dump / 审计 sink 回调（`audit_fn`）/ SLOW / **UDP 传输** / 错误环（FR-5.5b）/ `process_epoch`（FR-9.3） | AC-46 / AC-47 / AC-48 / AC-49 / AC-50 / AC-51 / AC-52 / AC-54 / AC-56 / AC-60 / AC-61 / AC-62 / AC-63 / AC-65 / AC-67 / AC-69 / AC-70 / AC-71b / AC-96 / AC-97 / AC-98 |
 
 ### 10.2 关键路径
 
@@ -482,9 +482,9 @@ M0 ──► M1 ──► M2 ──┬──► M3
 | 测试基建（fake clock / fake transport / 探针） | 8–12 | |
 | 平台验证（麒麟 / UOS / WS2016 / ARM64） | 15–25 | |
 | 小计：**v1（M0–M6）** | **108–173** | 不含 v1.1 项（mio 命名管道） |
-| 小计：**v1.1（M7）** | **8–13** | 载荷捕获 + 审计 + SLOW/采样 |
-| **合计（mio 提供命名管道）** | **116–186** | 不含 soak 与认证 |
-| **合计（自研命名管道）** | **124–199** | 同上 |
+| 小计：**v1.1（M7）** | **17–26** | 载荷捕获 5–8 + 审计 1–2 + SLOW/采样 1–2 + **UDP 4–6 + 错误环 2–3 + `process_epoch` 2–3 + 其余 2** |
+| **合计（mio 提供命名管道）** | **125–199** | 不含 soak 与认证 |
+| **合计（自研命名管道）** | **133–212** | 同上 |
 | **小计：v1（自研命名管道）** | **116–186** | |
 
 > 估算为**工程判断**，非实测。S1/S2 Spike 完成后应据此修正。
