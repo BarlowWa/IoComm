@@ -63,7 +63,9 @@ poll（任意线程，同一 monitor 串行）→ 取记录 → 调用方消费
 | 零同步 I/O | 热路径只写定长记录 + 可选 memcpy 进 arena |
 | 独立队列 | 每监控者一个 SPSC 环，生产端 loop 线程 |
 | 载荷捕获 | 深拷贝进监控自有 arena（不共享传输缓冲） |
-| 监控内存模型 | **逻辑配额 + 按需分配**：`max_bytes` 是**记账上限**，不是预留量；`monitor_budget_bytes` 是各 monitor **已提交配额之和**。记录与槽位按需分配、离开 `retain_window` 时归还（AC-72 的前提）。v1.1 的载荷 arena 仍按工作集预分配。超预算（配额之和）返回 `RESOURCE_EXHAUSTED`；热路径不分配 |
+| 监控内存模型 | **逻辑配额 + 按需分配**：`max_bytes` 是**记账上限**，不是预留量；`monitor_budget_bytes` 是各 monitor **已提交配额之和**。记录与槽位按需分配、离开 `retain_window` 时归还（AC-72 的前提）。超预算（配额之和）返回 `RESOURCE_EXHAUSTED` |
+| 环与槽位的预分配 | **环的存储**（`ring_capacity × sizeof(record)`）在 `monitor_open` 时**一次性分配**，不是逐条分配；热路径只做写槽位，**零分配** |
+| 载荷 arena（v1.1） | 在 `monitor_open` 时按工作集预分配；热路径只做 memcpy |
 | 事件来源 | `core` 定义 `MonitorSink` trait；会话/传输在打点处调用它，**`core` 不依赖域 crate** |
 | poll 线程 | 只读私有环、不依赖 loop 推进，故 loop 线程也允许 `timeout_ms=0` 的非阻塞 poll |
 | 视图保留 | 记录被 poll 取出后，其**槽位与 arena 块**在 `retain_window` 次 poll 内不复用（消费端持有引用计数） |
@@ -113,6 +115,10 @@ manual 模式下**只有一个宿主线程**在驱动 loop。因此：
 | **manual 模式建连** | **必须用 `iocomm_connect_async` / `iocomm_connect_node_async`**；同步 `iocomm_connect` 在 loop 线程上会返回 `WOULD_DEADLOCK` |
 
 > **`iocomm_runtime_drain` 的「返回时保证已排空」只对 owned 模式成立**；manual 模式改为「drain 返回 `ICOMM_ERR_WOULD_BLOCK` 表示仍有在途操作，调用方应继续 `run_once`」。
+
+> **尺寸协商与热更新的关系**：连接生效的 `max_frame_bytes` 在**握手完成时冻结**；之后 `tune_config.max_message_size`
+> 只影响**新建连接**与**尚未握手完成**的连接。这与 §5.0「热更新作用于全部端点」是**显式例外**，理由：
+> 中途改变已建连接的上限会让「同一连接上的前一条能发、后一条不能发」，且对端无从得知。
 
 ### 3.3 线程安全契约
 
@@ -187,6 +193,9 @@ NodeId = u64
 - 配置入口：`iocomm_runtime_config.node_id`（0 = 自动）。
 - 自动模式下，库在 `state_dir` 下读写 `node_id` 文件；`state_dir` 通过配置指定。
 - **v1 语义：`NodeId` 唯一标识一个 Runtime 实例**，同机多进程各自拥有独立 NodeId（不共享）。
+  **含 `state_dir` 的情况也一样**：多个进程配置**同一个** `state_dir` 时，先创建者写入 `node_id` 文件，
+  后创建者读到它会导致**共享同一 NodeId**——这是配置错误，库不检测（v1 无 `process_epoch` 可区分）。
+  文档要求：**每个 Runtime 使用独立的 `state_dir`**；共用目录属未定义行为。
   「同机多进程共享主机身份、用 `(NodeId, process_epoch)` 区分」是 **v1.1** 的扩展（FR-9.3），v1 不实现 `process_epoch`，任何 C 结构体里也没有这个字段。
 
 ### 5.2 对象模型：端点 / 连接 / 订阅
@@ -273,7 +282,7 @@ Message {
 
 `send` / `on_done(OK)` 的完成点统一定义为「**消息已完整交给传输层**」（OS 已接受），不是「对端已收到」。
 本库没有 ACK / 重传 / 去重 / 会话恢复，端到端确认属于应用层。异步发送另有 `send_options.queue_timeout_ms`
-约束「入队 → 开始写」这一段（超时产生 `DROPPED(TIMEOUT)`）；**开始写之后不再超时**——字节流中途放弃只能 RST 整条连接。
+约束「入队 → 开始写」这一段（超时产生 `DROPPED(TIMEOUT)`）；**开始写之后不再超时**——理由见 C ABI §6.2b（部分写出时放弃只能 RST；未写出时窗口不可观测）。
 ```
 
 > **没有 per-message 路由键**：v1 删除 `key`（ADR-002）。「消息类型」不是通信层的概念——需要时放进 payload 或拆成不同端点；v2 若要做 pub/sub，走**接收侧层级过滤**（端点名按 `/` 分段，L2），不引入 per-message 键。
@@ -343,7 +352,14 @@ Message {
 | **本机 IPC（unix/pipe）** | 复用同一套名字锁；实际 socket 文件放 `/run/iocomm/` 或命名管道，不在 `/tmp` |
 
 **规则**：
-- **默认所有具名端点都做跨进程唯一性检查**（不要求 `UNIQUE` 标志），**与传输后端无关**——inproc 端点同样参与（inproc 的「跨进程隔离」只针对它自己的 `listen_addr`，见 [FR-3.6](requirements.md)）；`UNIQUE` 只影响「重复注册时是拒绝还是允许第二实例」。若允许第二实例，第二实例收到 `CONFLICT` 但可改名为 `<name>#<pid>` 继续。
+- **默认所有具名端点都做跨进程唯一性检查**（不要求 `UNIQUE` 标志），**与传输后端无关**——inproc 端点同样参与（inproc 的「跨进程隔离」只针对它自己的 `listen_addr`，见 [FR-3.6](requirements.md)）。
+- **`UNIQUE` 的可观测差异**（否则这个标志没有意义）：
+  | 情形 | `UNIQUE` | 非 `UNIQUE` |
+  |---|---|---|
+  | 首次注册 | `OK` | `OK` |
+  | 他进程已持有同名 | `CONFLICT`，**不注册** | `OK`，库**自动**以 `<name>#<pid>` 注册；`endpoint_name_state(<原名>)` = `HELD_BY_OTHER` |
+  | 本进程已持有同名 | `ALREADY_EXISTS` | `ALREADY_EXISTS` |
+  > 自动改名只发生在**跨进程**冲突时；同进程内重名一律 `ALREADY_EXISTS`（FR-1.4）。
 - 名字 → 锁的映射用**稳定哈希**（同一名字在同一机器上恒定）。
 - **残留处理**：Linux 抽象命名空间与 Windows 命名对象都由内核在进程退出时回收，**不需要手工清理**；pathname socket 的残留清理见 [平台支持 §3.2](platform-support.md)。
 - 判定结果不是原子的：`name_state()` 查询与随后 `create()` 之间存在 TOCTOU 窗口。**`create()` 的返回值才是权威**，`name_state()` 仅用于诊断与友好提示。
@@ -365,12 +381,12 @@ Message {
 
 | # | 要求 | 接口表现 |
 |---|---|---|
-| T1 | 事件循环可手动驱动 | `run_once()` / `run_for()` / `run_until()` |
+| T1 | 事件循环可手动驱动 | `iocomm_runtime_run_once()` / `iocomm_runtime_run_for()`（**没有 `run_until`**，D-10） |
 | T2 | 时间可注入 | 所有超时经 `Clock` trait；内核零处直接读时钟 |
 | T3 | 传输可替换 | `Transport` trait；`FakeTransport` 做测试；`inproc` 让 M1 不碰 socket 也能验完整个模型 |
 | T4 | 端口可协商 | `listen(0)` 后 `local_port()` 可读 |
 | T5 | 线程归属可校验 | 调试构建下检查归属线程，违反返回错误 |
-| T6 | 定时器可枚举 | `pending_timer_count()` |
+| T6 | 定时器可枚举 | **v1 不提供公开入口**（D-10：C ABI 无此函数）；测试用 `FakeClock` 推进行为断言 |
 | T7 | 故障可注入 | 丢包 / 乱序 / 重复 / 分配失败 |
 | T8 | 指标可读 | 从**公开** API 读，不做后门 |
 | T9 | 无内部线程模式 | 与托管模式共享实现 |
@@ -435,13 +451,13 @@ enum ErrorCode {
 | # | 里程碑 | 产出 | 验收 |
 |---|---|---|---|
 | **M0** | 骨架 | C ABI 头（C99 可编译）+ crate 划分 + CI 三平台构建 | AC-P1 / AC-P5 / AC-18 / AC-24 / AC-35 / AC-95 |
-| **M1** | inproc 闭环 | 句柄表（代际）+ Runtime + 端点/连接模型 + **跨进程名字表（§6.4）** + `inproc` 传输（FR-3.5–3.10） | AC-4 / AC-11 / AC-25 / AC-32 / AC-33 / AC-36 / AC-40 / AC-80 / AC-81 / AC-82 / AC-83 / AC-84 / AC-89 |
-| **M2** | TCP + 双向 | tcp 传输 + accept + connect + send/recv/subscribe + 异步排队超时 + **[线格式](api/wire-format.md)（含 HELLO 握手）** | AC-1 / AC-2 / AC-10 / AC-29 / AC-30 / AC-31 / AC-33b / AC-39 / AC-73 / AC-74 / AC-75 / AC-76 / AC-77 / AC-78 / AC-90 / AC-92 / AC-99 |
-| **M3** | 状态与监控 | 心跳 + 条件集 + 指标 + 诊断（JSON 结构见 AC-94）+ **消息监控（信封级）** | AC-3 / AC-5 / AC-6 / AC-12 / AC-13 / AC-15 / AC-20 / AC-27 / AC-28 / AC-37 / AC-41 / AC-42 / AC-43 / AC-44 / AC-45 / AC-53 / AC-55 / AC-57 / AC-58 / AC-59 / AC-64 / AC-68 / AC-71 / AC-72 / AC-86 / AC-91 / AC-94 |
+| **M1** | inproc 闭环 | 句柄表（代际）+ Runtime + 端点/连接模型 + **跨进程名字表（§6.4）** + `inproc` 传输（FR-3.5–3.10） | AC-4 / AC-11 / AC-25 / AC-32 / AC-33 / AC-36 / AC-40 / AC-80 / AC-81 / AC-82 / AC-83 / AC-84 / AC-89 / AC-100 / AC-102 |
+| **M2** | TCP + 双向 | tcp 传输 + accept + connect + send/recv/subscribe + 异步排队超时 + **[线格式](api/wire-format.md)（HELLO 握手 · ERROR 帧 · 尺寸协商）** | AC-1 / AC-2 / AC-10 / AC-29 / AC-30 / AC-31 / AC-33b / AC-39 / AC-73 / AC-74 / AC-75 / AC-76 / AC-77 / AC-78 / AC-90 / AC-92 / AC-99 |
+| **M3** | 状态与监控 | 心跳 + 条件集 + 指标 + 诊断（JSON 结构见 AC-94）+ **消息监控（信封级）** | AC-3 / AC-5 / AC-6 / AC-12 / AC-13 / AC-15 / AC-20 / AC-27 / AC-28 / AC-37 / AC-41 / AC-42 / AC-43 / AC-44 / AC-45 / AC-53 / AC-55 / AC-57 / AC-59 / AC-64 / AC-68 / AC-71 / AC-72 / AC-86 / AC-91 / AC-94 / AC-101 |
 | **M4** | 发现 | 组播 + 单播 seed + 节点身份 + 阶段二端点能力 + **[发现线格式](api/wire-format.md#8-发现报文阶段一--阶段二)** | AC-7 / AC-9 / AC-14 / AC-16 / AC-21 / AC-22 / AC-23 / AC-34 / AC-38 / AC-79 / AC-85 / AC-87 / AC-93 |
 | **M5** | 本机 IPC | Linux unix socket + Windows 命名管道 | AC-P3 / AC-8 / AC-17 / AC-19 / AC-26 / AC-88 |
 | **M6** | 平台与加固 | 麒麟/UOS 实机 + glibc 2.17 基线 + soak | AC-P1 / AC-P2 / AC-P3 / AC-P4 / AC-P5 / AC-E1 / AC-E2 / AC-E3 / AC-E4 / AC-E5 / AC-E6 |
-| **M7** | **v1.1** 载荷捕获与审计 | arena / 限速 / 双 TTL / dump / 审计 sink 回调（`audit_fn`）/ SLOW / **UDP 传输** / 错误环（FR-5.5b）/ `process_epoch`（FR-9.3） | AC-46 / AC-47 / AC-48 / AC-49 / AC-50 / AC-51 / AC-52 / AC-54 / AC-56 / AC-60 / AC-61 / AC-62 / AC-63 / AC-65 / AC-67 / AC-69 / AC-70 / AC-71b / AC-96 / AC-97 / AC-98 |
+| **M7** | **v1.1** 载荷捕获与审计 | arena / 限速 / 双 TTL / dump / 审计 sink 回调（`audit_fn`）/ SLOW / **UDP 传输** / 错误环（FR-5.5b）/ `process_epoch`（FR-9.3） | AC-46 / AC-47 / AC-48 / AC-49 / AC-50 / AC-51 / AC-52 / AC-54 / AC-56 / AC-60 / AC-61 / AC-62 / AC-63 / AC-65 / AC-67 / AC-69 / AC-58 / AC-70 / AC-71b / AC-96 / AC-97 / AC-98 |
 
 ### 10.2 关键路径
 

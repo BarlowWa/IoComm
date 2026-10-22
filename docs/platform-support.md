@@ -59,7 +59,10 @@ Server 2016 = build 14393。以下特性在它上面**不可用**：
 |---|---|---|
 | Windows Server 2016 | 2022-01-11 | **2027-01-12** |
 | Windows Server 2019 | 2024-01-09 | 2029-01-09 |
-| Windows Server 2022 | 2027-10-14 | 2032-10-14 |
+| Windows Server 2022 | **2026-10-13** | **2031-10-14** |
+
+> **日期来源**：2022 的日期未能直读 Microsoft 官方页（该页 JS 渲染被拦截），取自公开生命周期表；
+> **签约前须以官方页面复核**。2016 / 2019 两行与官方一致。
 
 > **2027-01-12 之后**，Server 2016 需要 ESU（Azure Arc 或带 SA/SPLA 的本地许可）。**必须写进合同**，否则客户环境属于「无补丁运行」。
 
@@ -71,7 +74,7 @@ Server 2016 = build 14393。以下特性在它上面**不可用**：
 | loopback TCP | ✅ | 兜底 |
 | AF_UNIX | ❌ | Server 2019+ 才有 |
 
-> **命名管道优先用 `mio::windows::NamedPipe`**（mio 0.8.11+ 提供，把 IOCP 转换为就绪模型，可直接接入同一 `Poll`）。**仅在目标 mio 版本不提供或行为不满足时**，才自研 overlapped-IO 实现。
+> **命名管道优先用 `mio::windows::NamedPipe`**（**mio 0.8 起提供**——已核对 0.8.0 源码含 `sys/windows/named_pipe.rs`，0.7.2 / 0.7.10 无此模块；把 IOCP 转换为就绪模型，可直接接入同一 `Poll`）。**仅在目标 mio 版本不提供或行为不满足时**，才自研 overlapped-IO 实现。
 >
 > **备选自研路径**：`iocomm-transport` 内建 `win_pipe` 模块，用 `CreateNamedPipeW` / `ReadFile` / `WriteFile` + `OVERLAPPED` 自管完成端口（估 800–1200 行 + 测试）。**S2 Spike 先验证 `mio::windows::NamedPipe`：可用则不做自研。**
 > → mio 方案为**主路径**；自研仅作兜底，其工作量已单列为 [架构 §10.4](architecture.md) 的「合计（自研命名管道）」。

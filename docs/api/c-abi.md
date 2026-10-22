@@ -213,7 +213,7 @@ typedef struct iocomm_runtime_config {
     uint8_t  default_overflow_policy;
     uint8_t  reserved1[7];
 
-    /* 监控的全局预分配预算（字节），0 = 默认 64 MiB */
+    /* 监控的全局**已提交配额**上限（字节），0 = 默认 64 MiB；不是预分配量，见 §9.3 */
     uint64_t monitor_budget_bytes;
 
     /* 日志回调（可选）；audit_fn 为 NULL 时审计事件回退到此处的 AUDIT 类别 */
@@ -547,6 +547,9 @@ int32_t iocomm_conn_retain(iocomm_runtime_t rt, iocomm_conn_t conn,
  * **在途异步发送一律取消**：每条未完成的 send_async 仍恰好触发一次
  * on_done(code = ICOMM_ERR_CANCELLED)（与 AC-27 的 Runtime 销毁路径一致）。
  * 发送缓冲中尚未交给传输层的数据直接丢弃；随后以 FIN 关闭。
+ * **FIN 而不是 RST 的前提**：实现必须先 `shutdown(SHUT_WR)`，再**有界**读完接收缓冲
+ * （上限 64 KiB 或 100 ms，先到者）后 `close()`——否则内核因「接收缓冲有未读数据」发 RST，
+ * 对端看到的就不是 FIN（AC-33 / AC-33b 会失败）。
  * 不阻塞；任意线程可调用（同一连接的创建/销毁由调用方串行化，架构 §3.3）。重复调用返回 STALE_HANDLE。
  * 「先把缓冲 flush 出去再关」用 conn_close_graceful；
  * 「发完这一条就关」用 ICOMM_SEND_CLOSE_AFTER；
@@ -607,7 +610,7 @@ int32_t  iocomm_conn_get  (iocomm_runtime_t rt, iocomm_endpoint_t ep,
 | `send_queue_max` | **1024** | 条 | 每个端点的发送队列上限 |
 | `recv_queue_max` | **1024** | 条 | 每个端点的接收队列上限 |
 | `max_message_size` | **1 MiB** | 字节 | 见 §9.3；**上限 64 MiB**（超过则单条消息永远进不了队列） |
-| `max_handles` | **4096** | 个 | 本 Runtime 内**六类句柄合计**，**不含 Runtime 自身** |
+| `max_handles` | **4096** | 个 | 本 Runtime 内**六类句柄合计**，**不含 Runtime 自身**；**入站连接占用 conn 名额**（`accept` 分配了 conn 句柄就计入） |
 
 - 队列上限**同时**受条数与字节约束：条数 ≤ `queue_max`，字节总量 ≤ `min(queue_max × max_message_size, 64 MiB)`。
 - `max_message_size > 64 MiB` → `runtime_create` 返回 `INVALID_ARGUMENT`（否则单条消息永远进不了队列）。
@@ -622,8 +625,12 @@ int32_t  iocomm_conn_get  (iocomm_runtime_t rt, iocomm_endpoint_t ep,
 /*
  * **队列归属规则（唯一口径）**：
  *   - 归属端点的连接（`ep_owner == ep`）共用该端点的**一条发送队列**——这是 FR-4.6 的有界资源，
- *     容量 `send_queue_max` **条**，且字节总量 ≤ **64 MiB**（§6.0；与连接数无关）；
+ *     容量 `send_queue_max` **条**，且字节总量 ≤ **64 MiB**（§6.0）——**发送队列**的占用上界与连接数无关；
+ *     接收方向则是「端点一条 + 每连接各一条」，总数随连接数增长（上界 = `(1 + N) × recv_queue_max`）；
  *   - **每个队列项都携带目标连接句柄**（`conn_send` 填该连接；`endpoint_send` 扇出时为 N 个独立项）；
+ *   - **入站连接**：在 `accept` 回调内即确定为「拒绝」还是「持有」——拒绝时**不分配**发送队列；
+ *     持有（`conn_retain` / `conn_subscribe` / `CLOSE_AFTER`）时按「不归属端点」处理，
+ *     各自一条队列、容量取 runtime 默认（它们不参与端点扇出）；
  *   - 不归属任何端点的连接（`ep_owner == 0`）各自有一条队列，容量取 runtime 默认；
  *   - 接收方向：端点一条接收队列，连接一条接收队列（同样带归属）；
  *   - 溢出策略按端点取一个值，作用于该端点队列及其连接队列（ADR-002）。
@@ -632,8 +639,12 @@ int32_t  iocomm_conn_get  (iocomm_runtime_t rt, iocomm_endpoint_t ep,
  * 因此「每条未完成的 send_async 恰好触发一次 CANCELLED」（AC-76）可实现，且代价只与队列长度相关。
  *
  * **代价一：慢 peer 挤占共享容量**（与 ZeroMQ 的 per-peer HWM 相反，属有意取舍）。
- * 一条连接写不动时，它的项会占住共享队列，`DROP_OLDEST` 可能丢掉**发给其他连接**的消息。
- * 这与 FR-4「慢消费者不阻塞发布者」一致，但**不等价于**「不影响其他连接」。
+ * 一条连接写不动时，它的项会占满共享队列，**其他连接的新消息因此遭遇溢出策略**——
+ * 这是真正的跨连接影响，且与策略有关：
+ *   - `DROP_OLDEST`：被丢的是**队头**（通常是慢 peer 自己的旧项），其他连接的新消息能进队；
+ *   - `DROP_NEWEST`：被丢的是**其他连接的新消息**——跨连接影响最直接；
+ *   - `ERROR`：其他连接的新消息被拒（`BACKPRESSURE`）。
+ * 与 FR-4「慢消费者不阻塞发布者」一致，但**不等价于**「不影响其他连接」。
  * 需要几何隔离时把它们拆成不同端点；严格 per-peer 隔离不在 v1 范围。
  *
  * **代价二：队头阻塞**。队列严格 FIFO、不分连接轮转——队头项所属连接写不动时，
@@ -766,7 +777,10 @@ int32_t iocomm_endpoint_send(iocomm_runtime_t rt, iocomm_endpoint_t ep,
 | **异步**（`*_send_async`） | 入队成功 | **开始写**传输层 | `DROPPED(TIMEOUT)` + `on_done(ICOMM_ERR_TIMEOUT)` |
 
 - `opt->queue_timeout_ms` **只对异步生效**；同步的截止时间只由参数 `timeout_ms` 给出（`0` = 只尝试一次）。
-- **开始写之后不再超时**：帧已部分写入字节流，中途放弃只能 RST 整条连接，那属于 `conn_abort`；发送路径不做隐式 abort。
+- **开始写之后不再超时**：从「帧的第一个字节交给传输层」起就不再受 `queue_timeout_ms` 约束。
+  ① **若已写出部分字节**，中途放弃只能 RST 整条连接（帧已残缺），那属于 `conn_abort`；
+  ② **若一个字节都还没写出**，取消本可允许，但「开始写」与「写出首字节」之间的窗口不可观测，
+  为保持唯一口径统一以「开始写」为界。超时只用于「排队等不到写机会」，不用于「写得太慢」。
 - **两个 `timeout_ms` 不同名**：同步参数 `timeout_ms = 0` 是「只尝试一次」，异步字段 0 是「无截止」。所以字段叫 `queue_timeout_ms`，不叫 `timeout_ms`。
 - `on_done(OK)` 的完成点与同步成功返回**相同**——都是「已交给传输层」，不是「对端已收到」。
 
@@ -807,7 +821,9 @@ int32_t iocomm_conn_subscribe(iocomm_runtime_t rt, iocomm_conn_t conn,
                               iocomm_error* err);
 
 /* 取消订阅：带超时（FR-6.3）。**返回时该订阅的回调不再执行（join 语义）**。
- * loop 线程上调用返回 WOULD_DEADLOCK。 */
+ * loop 线程（含回调内）调用返回 WOULD_DEADLOCK——**唯一例外**：在**本订阅自己的回调内**
+ * 取消本订阅返回 ICOMM_OK，语义为「本次回调跑完后不再触发」（见 §6.4 @special）。
+ * 该例外是 AC-5 的显式豁免，不适用于取消其他订阅。 */
 int32_t iocomm_unsubscribe(iocomm_runtime_t rt, iocomm_subscription_t sub,
                            uint64_t timeout_ms, iocomm_error* err);
 
@@ -864,7 +880,8 @@ void iocomm_message_release(iocomm_message* msg);
          已在执行中的回调会先跑完，再销毁。
 ```
 
-> **`on_done` 的触发语义**（`send_async` / `connect_async`）：**恰好一次**——成功、失败、超时、取消、Runtime 销毁，五种路径都算。
+> **`on_done` 的触发语义**（`send_async` / `connect_async`）：**对已登记的操作恰好一次**——成功、失败、超时、取消、Runtime 销毁，五种路径都算。
+> **登记失败的调用不产生回调**（见下条）。
 
 > **「谁负责报告」的分界**（`send_async`）：同步返回值只报告**不可能再回调**的错误——句柄无效 / 参数非法 / 在 accept 回调内未表态 / 端点未监听等。
 > 一旦操作已登记（返回 `ICOMM_OK`），**后续一切结果都走 `on_done`**：`OK` / `ICOMM_ERR_TOO_LARGE` / `WOULD_BLOCK` / `TIMEOUT` / `CANCELLED` / `DISCONNECTED`。
@@ -1008,6 +1025,7 @@ typedef struct iocomm_stats {
     uint64_t retransmits;          /* TCP 层重传（可读时）；否则 0 */
     uint64_t heartbeat_timeouts;
     uint64_t reconnects;
+    uint64_t discovery_oversize;   /* 因单条超 1400 B 而未发送的发现条目数（FR-2.9） */
     uint64_t protocol_errors;      /* 收到 ERROR 帧或判定帧损坏的次数（v1） */
     uint64_t audit_events;         /* 已送交 audit_fn（v1：已写 log_fn 的 AUDIT 类别）的事件数 */
 
@@ -1061,6 +1079,9 @@ void    iocomm_free_text(char* text, uint64_t len);
 | `SLOW` 事件（`slow_threshold_ms`） | **v1.1** |
 | `audit_fn` / `iocomm_audit_record` | **v1.1**（v1 走 `log_fn` 的 AUDIT 类别） |
 | `stats.audit_events` | **v1**——计「已写 `log_fn` 的 AUDIT 类别」的事件数；v1.1 起改为计「已送交 `audit_fn`」 |
+| `stats.protocol_errors` | **v1**（FR-5.4） |
+| `stats.discovery_oversize` | **v1**（FR-2.9） |
+| `process_epoch`（FR-9.3） | **v1.1**（v1 无此字段） |
 
 > 这张表是**版本归属的唯一权威**；各节里的〔v1.1〕标注若与它冲突，以本表为准。
 
@@ -1205,13 +1226,14 @@ typedef struct iocomm_monitor_config {
 | **`capture_ttl_ms`** | 0 | 到期后**停止捕获载荷**，元数据继续记录 |
 | **`monitor_ttl_ms`** | 0 | 到期后**关闭整个监控者**；上限 24 h |
 
-> **内存模型：逻辑配额 + 按需分配**（D-09 / B-09 定稿）。`max_bytes` 是**记账上限**，**不是预留量**：
-> 记录与槽位按需分配，记录离开 `retain_window` 时归还字节（AC-72）。另有 1 条 LOST 槽在 `max_bytes` 之外单独计。
+> **内存模型**（D-09 / B-09 定稿）：**环的存储一次性预分配**（`ring_capacity × sizeof(record)`，在 `monitor_open` 时分配）；
+> **记录槽位按需占用**，离开 `retain_window` 时归还（AC-72）；`max_bytes` 是**记账上限**，不是预留量。
+> 另有 1 条 LOST 槽在 `max_bytes` 之外单独计。
 > **`max_bytes` 覆盖记录 + 载荷**，见上表；`max_total_bytes` 是**累计**配额，不参与任何配额计算。
 > **v1（载荷捕获关闭）**：`max_bytes` 只计记录，**默认固定 4 MiB**（约 4 万条），不随 `ring_capacity` 自动收紧——
 > 默认值只允许一个，避免「同一配置在两种口径下得到不同上限」。要更小的占用请显式设置 `max_bytes`。
 > **预分配失败** → `RESOURCE_EXHAUSTED`。
-> 所有监控者的 **`max_bytes` 之和**（已提交配额）不得超过全局预算 `runtime_config.monitor_budget_bytes`（0 = 默认 64 MiB）；
+> 所有监控者的 **`max_bytes` 之和**（已提交配额，**不是实际占用**）不得超过全局预算 `runtime_config.monitor_budget_bytes`（0 = 默认 64 MiB）；
 > 超预算（`monitor_open` 时即检查）或实际分配失败 → `RESOURCE_EXHAUSTED`。
 > **`max_total_bytes` 不受预算限制**：它是累计配额，可在远大于工作集时配置（如 512 MiB），
 > 达到后按 §9.4 的 `RESOURCE_EXHAUSTED` 规则停止捕获。
@@ -1219,7 +1241,9 @@ typedef struct iocomm_monitor_config {
 > **消息尺寸上限**：`max_message_size`（默认 1 MiB）约束**整帧**——`20 + tlv_len + payload_len`
 > （见 [线格式 §1](wire-format.md)），即**发送方可见的 payload 上限比该值小约 20–80 B**。
 > 在发送侧**先于入队**检查——
-> 同步 `conn_send` / `endpoint_send` 返回 `TOO_LARGE`；异步经 `on_done(code=TOO_LARGE)`，**不入队**。
+> **同步返回**（`TOO_LARGE` 属于「不可能再回调」的入队前失败，见 §6.2）：
+> 同步 `conn_send` / `endpoint_send` 与异步 `*_send_async` **一律同步返回 `ICOMM_ERR_TOO_LARGE`**，
+> 异步**不会**再触发 `on_done`（AC-78）。**不入队**。
 > 接收侧超限：关闭该连接（`DISCONNECTED`）并产生一条 `DROPPED(reason=TOO_LARGE)` 记录。
 > **发送侧超限不产生 DROPPED**（消息从未入队，只返回错误码）。
 >

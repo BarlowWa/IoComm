@@ -1,6 +1,10 @@
 # IoComm 待核实问题清单（2026-10-20）
 
-> **状态（2026-10-22 更新）**：**全部 40 条已人工核实并处置完毕**——**C 37 条**（全部已处置）、**R 3 条**（D-08 / B-06 / B-12，理由见各行）。
+> **状态（2026-10-22 更新）**：审计来源的 **40 条已核实并处置**——C 37 条、R 3 条（D-08 / B-06 / B-12）。
+>
+> ⚠️ **本清单的覆盖边界**：审计只覆盖了 2026-10-20 时的 **6 份文档**；2026-10-21 新增的 `docs/api/wire-format.md`
+> 与 `ADR-002` **不在其覆盖范围内**。它们的核查记录见 `.tmp_research/iocomm-*-audit/` 下的后续报告。
+> **本清单的 `文件:行号` 指向 2026-10-20 版本，已全面漂移，不作为当前定位依据。**
 > 核实判据与逐条结论见 §7b。
 > 来源：只读审计 agent 对 `IoComm/` 6 份设计文档（无源码）的交叉审计，报告原文在
 > `.tmp_research/agent-delivery-test/iocomm-declared-not-landed.md`。
@@ -24,7 +28,7 @@
 
 | ID | 严重度 | 位置 | 问题摘要 | agent 建议处置 | 状态 |
 |---|---|---|---|---|---|
-| D-01 | B0 | `docs/api/c-abi.md:800`、`:473-479`、`:489-504`；`docs/requirements.md:263`（AC-41） | 丢弃原因 `ICOMM_DROP_TIMEOUT`（“异步发送在 timeout_ms 内未完成”）存在，但 `iocomm_send_options` 与两个 `*_send_async` 都没有 `timeout_ms` 参数 → AC-41 不可构造 | 补设计：`send_options` 尾部追加 `uint64_t timeout_ms`（尾部追加只升 minor）；写明超时后消息出队、`on_done(TIMEOUT)`、产生 `DROPPED(TIMEOUT)` | **C**（§7-V1）；**已处置 2026-10-21**：补 `send_options.queue_timeout_ms`（0 = 无截止，计时「入队→开始写」），并把 `on_done(OK)` 完成点定为「已完整交给传输层」 |
+| D-01 | B0 | `docs/api/c-abi.md:800`、`:473-479`、`:489-504`；`docs/requirements.md:263`（AC-41） | 丢弃原因 `ICOMM_DROP_TIMEOUT`（“异步发送在 timeout_ms 内未完成”）存在，但 `iocomm_send_options` 与两个 `*_send_async` 都没有 `timeout_ms` 参数 → AC-41 不可构造 | 补设计：`send_options` 尾部追加 `uint64_t queue_timeout_ms`（当时的 `timeout_ms` 命名已废弃）（尾部追加只升 minor）；写明超时后消息出队、`on_done(TIMEOUT)`、产生 `DROPPED(TIMEOUT)` | **C**（§7-V1）；**已处置 2026-10-21**：补 `send_options.queue_timeout_ms`（0 = 无截止，计时「入队→开始写」），并把 `on_done(OK)` 完成点定为「已完整交给传输层」 |
 | D-02 | B0 | `docs/api/c-abi.md:645`（`node_info.name`）、`:136-161`（`runtime_config` 无名字段）、`:221-222` | 节点名无来源；全文无查询本机 `node_id` 的 API → AC-9 无法从公开 API 观测 | 补设计（二选一）：`runtime_config` 追加 `node_name` + 新增 `iocomm_runtime_node_id()`；或删 `node_info.name`，展示名由调用方生成 | **C**（§7-V2）；**已处置 2026-10-21**：选前者（+ `iocomm_runtime_node_name()`、FR-9.4、AC-79） |
 | D-03 | B0/B1 | `docs/architecture.md:422`（M1）、`:25/42/77/455`；`docs/api/c-abi.md:260`；`IoComm/README.md` 示意图 | `inproc` 是 M1 唯一传输，但 `requirements.md` 无 FR、无 AC，`listen_transport` 字符串也没有；语义（跨 runtime？拷贝？参与发现？）全空白 | 补设计：新增 FR（P0）、字符串加 `"inproc"`、定义 `listen_addr` 语义、补 AC、工作量拆行、明确仍走帧层 | **C**（§7-V3）；**已处置 2026-10-21**：FR-3.5–3.10 + AC-80–82；字符串加 `"inproc"`；**只要求「结构同构」**（帧边界/顺序号/大小校验保留，允许移动不拷贝），不强制逐字节走同一条编码路径 |
 | D-04 | B0 | `docs/api/c-abi.md` §9.6 C7 / C11 | 审计契约 **C7 与 C11 的正文在冒号处截断**（“顺序固定为：”“两种路径：”后无内容），AC-56/AC-63 依赖它们 | 补设计（M0 前）：写出完整审计状态机与两条 close 路径；`runtime_destroy` 不产生（与 C9 一致） | **C**（§7-V4） |
@@ -38,7 +42,7 @@
 | D-07 | B3 | `docs/requirements.md:86`；`docs/api/c-abi.md:769-772` | FR-5.5 三件事混一条 P1：连接表 dump、队列水位、“最后 N 条错误”；错误环/容量/JSON 键名/版本全未定义 | 拆分：dump 留 v1 并定义 JSON 格式；错误环降 v1.1 | **C**（已处置 2026-10-22：FR-5.5 拆为 v1（连接表 + 队列水位）与 FR-5.5b（最后 N 条错误，v1.1）；`diagnostic_dump` 注明顶层含 `"version"`） |
 | D-08 | B3 | `docs/requirements.md:286`（AC-64）、`:290`（AC-68）；`docs/architecture.md:424`、`:428` | AC-64 测 v1.1 的 LOST 槽机制、AC-68 测 v1.1 的 TTL 释放，却挂在 v1 的 M3 | 修映射：AC-68 移 M7 并标〔v1.1〕；AC-64 拆 a/b 或整条移 M7 | **R**（**推翻**：`FR-10.8` 的 LOST 槽是 **P0**，`monitor_ttl_ms` 也不是 v1.1（v1.1 只有载荷捕获的 TTL）。AC-64 唯一真实问题是覆盖列误写里程碑 `M4` → 已改为 `FR-10.8 / C4`） |
 | D-09 | B3 | `docs/api/c-abi.md:911`、`:921-924`；`docs/requirements.md:294`（AC-72） | 监控内存模型未定稿：“open 时预分配”与“动态工作集 + 耗尽回收”两套写法并存 | 定稿为「逻辑配额 + 按需分配」（`max_bytes` 为记账上限，`monitor_budget_bytes` 为已提交配额之和） | **C**（已处置 2026-10-22：定稿为「**逻辑配额 + 按需分配**」——`max_bytes` 是记账上限不是预留量；`monitor_budget_bytes` 是各 monitor 已提交配额之和；记录离开 `retain_window` 归还字节） |
-| D-10 | B3 | `docs/architecture.md:356`、`:361` | 架构/里程碑引用的 `run_until` 与 `pending_timer_count` 在 C ABI 中不存在 | `run_until` 删除；`pending_timer_count` 若只服务测试则删/改为测试接口 | **C**（§7-V6） |
+| D-10 | B3 | `docs/architecture.md:356`、`:361` | 架构/里程碑引用的 `run_until` 与 `pending_timer_count` 在 C ABI 中不存在 | `run_until` 删除；`pending_timer_count` 若只服务测试则删/改为测试接口 | **C**（§7-V6）；**已处置 2026-10-22**：T1 删除 `run_until`、T6 改为「v1 不提供公开入口」 |
 | D-11 | B3 | `docs/api/c-abi.md:636-637`；`docs/architecture.md:314/317/78` | `registry_plugin` 三处残留（字段、插件点、`local-registry` 策略名），无 FR/AC/里程碑/加载语义 | 删除（v1）；架构表格行标「v2 评估项」 | **C**（已处置 2026-10-21：删除 `discovery_config.registry_plugin`；架构表改为「v2 评估项」） |
 | D-12 | B3 | `docs/architecture.md:321`、`:425`；`docs/api/c-abi.md:685-697`；`docs/requirements.md:260`（AC-38） | discovery 快照四函数（`take/count/get/release`）有 API 无 FR/AC；`release` 非幂等 `STALE_HANDLE` 语义未验收 | 补 FR-2.8 + 3 条 AC（空快照 / index 越界 / release 后使用），写入 M4 产出 | **C**（已处置 2026-10-21：新增 FR-2.8 + AC-87，M4 验收补 AC-87） |
 | D-13 | B3/B2 | `docs/api/c-abi.md:277`；`docs/requirements.md:46` | `ICOMM_ENDPOINT_LOCAL` 标志无 FR、无语义，与 `publish_local` / `listen_transport` 关系未定义 | 推荐删除 v1 该标志（本机可见性已可由 transport + `publish_local` 表达） | **C**（已处置 2026-10-22：删除 `ICOMM_ENDPOINT_LOCAL`） |
@@ -72,8 +76,8 @@
 | B-12 | 中 | `IoComm/README.md:86` vs `docs/api/c-abi.md:489-495` | README 快速开始的 `conn_send_async` 调用与签名不一致 | 按签名改正 | **R**（**推翻**：README:91 的 `iocomm_conn_send_async(rt, conn, &opt, msg, on_done, u, &op, &err)` 与真实签名**参数个数与顺序一致**；`msg` 是未定义的示例变量，不是「签名不一致」） |
 | B-13 | 中 | `docs/platform-support.md:17`；`IoComm/README.md:131` 附近 | ARM64 Windows 标 Tier 1 却“暂不列入范围” | Tier 列改「—（不在产品范围）」或明确“工具链 Tier 1、产品不承诺” | **C**（已处置 2026-10-22：ARM64 Windows Tier 列改「—（不在产品范围）」，说明改「工具链可构建，但不承诺、不验收」） |
 | B-14 | 低 | `docs/platform-support.md:16` | MinGW 标 Tier 1 但“可选；需自测” | 推荐删除该行；或标“可选/不承诺”并补 MinGW 构建 AC-P6 | **C**（已处置 2026-10-22：删除 MinGW 行） |
-| B-15 | 低 | `docs/adr/ADR-001-language-and-platform.md:90`；`IoComm/README.md`、`docs/architecture.md:154` | ADR“tokio 只作可选 feature” vs README/架构“不绑 tokio” | ADR 改为“不进入核心依赖，至多用于基准/示例”或删除 | U |
-| B-16 | 低 | `docs/adr/ADR-001-language-and-platform.md:92`；`docs/architecture.md:40` | ADR 依赖清单有 `socket2`，架构的 crate 依赖没有 | 补表或从 ADR 删除 | U |
+| B-15 | 低 | `docs/adr/ADR-001-language-and-platform.md:90`；`IoComm/README.md`、`docs/architecture.md:154` | ADR“tokio 只作可选 feature” vs README/架构“不绑 tokio” | ADR 改为“不进入核心依赖，至多用于基准/示例”或删除 | **C**（已处置 2026-10-22：B-15 ADR-001 改为「tokio 不进入任何 crate 依赖」） |
+| B-16 | 低 | `docs/adr/ADR-001-language-and-platform.md:92`；`docs/architecture.md:40` | ADR 依赖清单有 `socket2`，架构的 crate 依赖没有 | 补表或从 ADR 删除 | **C**（已处置 2026-10-22：B-16 架构 crate 表补 `socket2` 说明） |
 
 ## 4. 被否决的处置方案（agent 已论证过，重新提出前先读）
 
