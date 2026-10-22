@@ -70,7 +70,7 @@
 | 编号 | 需求 | 优先级 |
 |---|---|---|
 | FR-3.5 | **进程内传输**：`listen_transport = "inproc"`，连接**同一进程内的 Runtime**（也允许同一 Runtime 连自己的端点），不走 socket / 管道 | P0 |
-| FR-3.6 | inproc 的 `listen_addr` 是**进程内唯一名字**（≤255 B，必填），与端点名是两套独立命名空间；同进程重名返回 `ALREADY_EXISTS`，跨进程天然隔离 | P0 |
+| FR-3.6 | inproc 的 `listen_addr` 是**进程内唯一名字**（≤255 B，必填），与端点名是两套独立命名空间；同进程重名返回 `ALREADY_EXISTS`。**「跨进程天然隔离」只指 `listen_addr` 这个名字**——端点名（FR-1.4/1.5）无论用哪种传输都参与跨进程名字表 | P0 |
 | FR-3.7 | **投递经接收方 loop 的任务队列，绝不在 `send` 调用栈内同步回调**（避免回调重入与死锁） | P0 |
 | FR-3.8 | 与 tcp 保持一致：帧结构（消息边界 / `sequence` / `original_len`）、**出站大小校验**（`TOO_LARGE`）、端点队列与溢出策略、监控打点 | P0 |
 | FR-3.9 | **不参与发现**：`publish_local = 1` 时 `endpoint_create` 返回 `INVALID_ARGUMENT`，不做静默空操作 | P0 |
@@ -99,7 +99,8 @@
 | FR-5.2 | 状态变化**可订阅**（不只是 `get_state()`） | P0 |
 | FR-5.3 | 应用层心跳（带序号 + 双向确认） | P0 |
 | FR-5.4 | 指标快照：吞吐 / 延迟 / 队列深度 / 丢弃 / 重连次数 | P0 |
-| FR-5.5 | 诊断 dump（连接表、队列水位、最后 N 条错误） | P1 |
+| FR-5.5 | 诊断 dump：**连接表 + 队列水位**，JSON 文本（顶层含 `"version"` 键，供格式演进） | P1 |
+| FR-5.5b | 诊断 dump：**最后 N 条错误**（需持续记录，有内存与抖动成本） | **v1.1** |
 | FR-5.6 | 控制面：启停、重配置（只动通信参数）、关闭/排空 | P0 |
 | FR-5.7 | 环境指纹日志（OS/内核/glibc/ulimit/网卡/安全模块），通过 `log_fn` 在 `runtime_start` 时输出一次 | P1 |
 
@@ -138,7 +139,7 @@
 |---|---|---|
 | FR-9.1 | 节点身份（`node_id`）跨进程重启**保持稳定** | P0 |
 | FR-9.2 | 支持显式配置或自动持久化（`state_dir`） | P0 |
-| FR-9.3 | 同机多进程可共享同一主机身份，用进程实例区分 | P1 |
+| FR-9.3 | 同机多进程可共享同一主机身份，用进程实例区分（`process_epoch`） | **v1.1**（v1 语义：`node_id` 唯一标识**一个 Runtime 实例**，同机多进程各自独立） |
 | FR-9.4 | **节点名**：`runtime_config.node_name`（创建期不可变），随发现上报；本机可通过 `iocomm_runtime_node_id()` / `iocomm_runtime_node_name()` 查询 | P1 |
 
 ### FR-10 消息级监控
@@ -325,6 +326,7 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | **AC-81** | 同进程内重复 `inproc` 名字 → `ALREADY_EXISTS`；两个进程用同一名字互不可见 | 通过 | FR-3.6 |
 | **AC-82** | inproc 上超 `max_message_size` 的发送返回/回调 `TOO_LARGE`（与 tcp 一致）；`publish_local=1` + `inproc` → `INVALID_ARGUMENT` | 通过 | FR-3.8 / FR-3.9 |
 | **AC-88** | 对端进程被 `kill -9`：≤ N 秒产生断开事件；随后对端重启并重新 `listen` 同一 pathname socket / 管道名，**无需人工删除残留文件即成功** | 通过 | FR-3.3 / FR-3.4 |
+| **AC-89** | 两进程同时注册同名端点：非 `UNIQUE` 时第二实例 `create` 返回 `CONFLICT`，改名为 `<name>#<pid>` 后成功；`UNIQUE` 时直接拒绝 | 通过 | FR-1.4 / FR-1.5 |
 | **AC-83** | owned 模式：主线程**从不调用** `run_once` 也能完成一次建连 + 往返收发；IO 线程恒为 1（子进程内枚举线程数验证） | 通过 | FR-6.5 |
 | **AC-84** | `max_handles = 1` 时，第二次 `endpoint_create` 返回 `RESOURCE_EXHAUSTED`（不崩溃、不静默失败） | 通过 | FR-1.7 |
 | **AC-85** | `discovery_lease_ms = 3000`：正常心跳续期只产生一次 `JOINED`；停掉对端后 ≤ lease 产生一次 `LEFT`，且快照中该节点被移除 | 通过 | FR-2.3 |
@@ -361,6 +363,7 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | 2026-10-16 | 原始需求提出 |
 | 2026-10-19 | 确认：独立 IO 库 / Rust 核心 / C ABI / x86_64+ARM64 / 排除国产私有架构 |
 | 2026-10-20 | 新增 FR-10 消息级监控；移除 `ICOMM_ENDPOINT_SECRET`（监控改为独立对象） |
+| 2026-10-22 | 完成任务 C 全部 12 条遗留：FR-3.6 限定语（inproc 隔离只指 `listen_addr`）、FR-5.5 拆分（+FR-5.5b 最后 N 条错误 → v1.1）、FR-9.3 降 v1.1（v1 的 `node_id` 标识 Runtime 实例）、新增 AC-89；新建 `docs/api/wire-format.md`（D-06）；`c-abi.md` §9.0 新增 v1/v1.1 归属表；监控内存模型定稿为「逻辑配额 + 按需分配」；删除 `ICOMM_ENDPOINT_LOCAL`；`max_bytes` 默认值定死 4 MiB；平台矩阵删 MinGW、ARM64 Windows 标为不在产品范围 |
 | 2026-10-21 | 完成任务 C 核实：40 条中 **C 37 / R 3**；本轮处置 25 条（其中新增 FR-2.8 / FR-6.8、AC-83–88），12 条仍待处置（D-05/06/07/09/13/16、B-03 残余/08/09/10/13/14）。推翻 D-08、B-06、B-12 |
 | 2026-10-21 | 落实 D-11（`registry_plugin` 删除，中心注册表标 v2 评估项） |
 | 2026-10-21 | M0 冻结前补三项缺口：① 异步发送补 **`send_options.queue_timeout_ms`**（0 = 无截止），并把 `on_done(OK)` 的完成点定为「**已完整交给传输层**」（同步路径同步对齐该含义；新增 AC-77 / AC-78；FR-10.3 的 `timeout` 口径）；② 补**节点名**（`runtime_config.node_name` + `iocomm_runtime_node_id()` / `iocomm_runtime_node_name()`，FR-9.4 / AC-79）；③ 补 **inproc** 的 FR-3.5–3.10 / AC-80–82，`listen_transport` 加入 `"inproc"`，并写明与 nng 的**有意分歧**（保留出站大小校验）。顺带落 B-01（UDP → v1.1）、B-04（FR-10.17 预算属 v1）、D-15（FR-3.4 措辞）、D-17 / D-19 / D-22 / D-23（AC 覆盖列与 AC 口径） |

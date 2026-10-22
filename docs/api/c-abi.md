@@ -276,7 +276,7 @@ const iocomm_abi_header* iocomm_abi_version(void);
 
 **规则**：
 1. `tune_config` 的 `iface_index` 作用于**全部端点与发现**；`endpoint_config.iface_index` 与 `discovery_config.iface_index` 只作用于各自对象。**若同时设置，以更具体的那个为准**（端点 > 全局）。
-2. **发现的心跳/租约只有一处权威**：`iocomm_discovery_start` 时用 `discovery_config.heartbeat_ms/lease_ms` 初始化；之后的 `tune_config.discovery_heartbeat_ms/lease_ms` 覆盖它。`discovery_config` 的这两个字段**不参与版本协商**以外的任何逻辑。
+2. **发现的心跳/租约的生效顺序**：`iocomm_discovery_start` 时以 `discovery_config.heartbeat_ms/lease_ms` 为**初值**；之后 `tune_config.discovery_heartbeat_ms/lease_ms` 覆盖它（0 = 保持）。`discovery_config` 的这两个字段**只在 `discovery_start` 这一刻生效**，不参与运行期的后续覆盖判断。
 3. `tune_config` 中值为 0 表示「保持当前值」；**没有「恢复默认」的语义**（要恢复请重建 Runtime）。
 4. `runtime_config` 中 `driver_mode` / `node_id` / `state_dir` / `node_name` / `log_fn` / `audit_fn` / `max_handles` / `monitor_budget_bytes` 是**创建期参数**，传给 `iocomm_runtime_reconfigure` 不适用（它只收 `iocomm_tune_config`）。
 
@@ -308,7 +308,6 @@ typedef struct iocomm_endpoint_config {
   { { sizeof(iocomm_endpoint_config), ICOMM_ABI_MAJOR, ICOMM_ABI_MINOR, 0, 0, 0 } }
 
 #define ICOMM_ENDPOINT_UNIQUE  0x0001u  /* 单实例排他 */
-#define ICOMM_ENDPOINT_LOCAL   0x0002u  /* 仅本机可见 */
 /* （原 ICOMM_ENDPOINT_SECRET 已移除：监控改为独立的 iocomm_monitor_*，见 §9） */
 
 int32_t iocomm_endpoint_create(iocomm_runtime_t rt,
@@ -861,7 +860,8 @@ typedef struct iocomm_stats {
 int32_t iocomm_stats_snapshot(iocomm_runtime_t rt, iocomm_stats* out,
                               iocomm_error* err);
 
-/* 诊断 dump：返回 JSON 文本，调用方用 iocomm_free_text 释放。 */
+/* 诊断 dump：返回 JSON 文本（顶层含 "version" 键，供格式演进），调用方用 iocomm_free_text 释放。
+ * v1：连接表 + 队列水位（FR-5.5）。「最后 N 条错误」属 v1.1（FR-5.5b）。 */
 int32_t iocomm_diagnostic_dump(iocomm_runtime_t rt, char** out_text,
                                uint64_t* out_len, iocomm_error* err);
 void    iocomm_free_text(char* text, uint64_t len);
@@ -875,6 +875,23 @@ void    iocomm_free_text(char* text, uint64_t len);
 
 > **定位**：状态监控回答「链路健康吗」，消息监控回答「**这一条消息去哪了**」。
 > 默认只记**信封元数据**；载荷捕获是显式、限时、限速、限量的调试能力。
+
+### 9.0 v1 / v1.1 归属（**唯一权威**）
+
+| 成员 | 所属 |
+|---|---|
+| `monitor_open` / `monitor_poll` / `monitor_close` / `monitor_get_stats` | v1 |
+| `iocomm_mon_record` 全部**信封**字段（`capture_id` / `seq` / 时间 / 来源 / 连接 / `original_len` / `correlation_id` / `drop_reason` / `kind`） | v1 |
+| `ring_capacity` / `retain_window` / `max_bytes` / `sample_per_mille` / `monitor_ttl_ms` | v1 |
+| `max_payload_bytes` / `capture_per_mille` / `max_bytes_per_sec` / `max_total_bytes` / `capture_ttl_ms` | **v1.1**（v1 传非 0 视为 0） |
+| `monitor_capture_set` | **v1.1**（v1 恒返回 `NOT_SUPPORTED`） |
+| `iocomm_mon_record_payload` / 载荷视图 / `retained_*` | **v1.1** |
+| `monitor_dump` 家族 | **v1.1** |
+| `iocomm_mon_record.captured_len` / `flags` 的 `TRUNCATED` / `SAMPLED_OUT` | **v1.1**（v1 恒 0） |
+| `SLOW` 事件（`slow_threshold_ms`） | **v1.1** |
+| `audit_fn` / `iocomm_audit_record` | **v1.1**（v1 走 `log_fn` 的 AUDIT 类别） |
+
+> 这张表是**版本归属的唯一权威**；各节里的〔v1.1〕标注若与它冲突，以本表为准。
 
 ### 9.1 事件与丢弃原因
 
@@ -1017,13 +1034,14 @@ typedef struct iocomm_monitor_config {
 | **`capture_ttl_ms`** | 0 | 到期后**停止捕获载荷**，元数据继续记录 |
 | **`monitor_ttl_ms`** | 0 | 到期后**关闭整个监控者**；上限 24 h |
 
-> **预分配上限**：`monitor_open` 预留 `max_bytes + sizeof(iocomm_mon_record)`（工作集 + 1 条 LOST 槽）。
-> **`max_bytes` 覆盖记录 + 载荷**，见上表；`max_total_bytes` 是**累计**配额，不参与预分配。
-> **v1（载荷捕获关闭）**：`max_bytes` 只计记录，默认 4 MiB 可容纳约 4 万条；若要更省的默认值，v1 可将默认改为
-> `ring_capacity × sizeof(iocomm_mon_record)`（约 90 KB）——**库按此自动收紧，不预留未使用的 arena**。
+> **内存模型：逻辑配额 + 按需分配**（D-09 / B-09 定稿）。`max_bytes` 是**记账上限**，**不是预留量**：
+> 记录与槽位按需分配，记录离开 `retain_window` 时归还字节（AC-72）。另有 1 条 LOST 槽在 `max_bytes` 之外单独计。
+> **`max_bytes` 覆盖记录 + 载荷**，见上表；`max_total_bytes` 是**累计**配额，不参与任何配额计算。
+> **v1（载荷捕获关闭）**：`max_bytes` 只计记录，**默认固定 4 MiB**（约 4 万条），不随 `ring_capacity` 自动收紧——
+> 默认值只允许一个，避免「同一配置在两种口径下得到不同上限」。要更小的占用请显式设置 `max_bytes`。
 > **预分配失败** → `RESOURCE_EXHAUSTED`。
-> 该**工作集**总量不得超过库全局预算 `runtime_config.monitor_budget_bytes`（0 = 默认 64 MiB）；
-> 超预算或系统分配失败 → `RESOURCE_EXHAUSTED`。
+> 所有监控者的 **`max_bytes` 之和**（已提交配额）不得超过全局预算 `runtime_config.monitor_budget_bytes`（0 = 默认 64 MiB）；
+> 超预算（`monitor_open` 时即检查）或实际分配失败 → `RESOURCE_EXHAUSTED`。
 > **`max_total_bytes` 不受预算限制**：它是累计配额，可在远大于工作集时配置（如 512 MiB），
 > 达到后按 §9.4 的 `RESOURCE_EXHAUSTED` 规则停止捕获。
 >

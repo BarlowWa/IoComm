@@ -1,6 +1,6 @@
 # IoComm 待核实问题清单（2026-10-20）
 
-> **状态（2026-10-21 更新）**：**全部 40 条已人工核实**——**C 37 条**（其中 **25 条已在 2026-10-21 的改动中处置**、**12 条仍待处置**）、**R 3 条**（D-08 / B-06 / B-12，理由见各行）。
+> **状态（2026-10-22 更新）**：**全部 40 条已人工核实并处置完毕**——**C 37 条**（全部已处置）、**R 3 条**（D-08 / B-06 / B-12，理由见各行）。
 > 核实判据与逐条结论见 §7b。
 > 来源：只读审计 agent 对 `IoComm/` 6 份设计文档（无源码）的交叉审计，报告原文在
 > `.tmp_research/agent-delivery-test/iocomm-declared-not-landed.md`。
@@ -28,23 +28,23 @@
 | D-02 | B0 | `docs/api/c-abi.md:645`（`node_info.name`）、`:136-161`（`runtime_config` 无名字段）、`:221-222` | 节点名无来源；全文无查询本机 `node_id` 的 API → AC-9 无法从公开 API 观测 | 补设计（二选一）：`runtime_config` 追加 `node_name` + 新增 `iocomm_runtime_node_id()`；或删 `node_info.name`，展示名由调用方生成 | **C**（§7-V2）；**已处置 2026-10-21**：选前者（+ `iocomm_runtime_node_name()`、FR-9.4、AC-79） |
 | D-03 | B0/B1 | `docs/architecture.md:422`（M1）、`:25/42/77/455`；`docs/api/c-abi.md:260`；`IoComm/README.md` 示意图 | `inproc` 是 M1 唯一传输，但 `requirements.md` 无 FR、无 AC，`listen_transport` 字符串也没有；语义（跨 runtime？拷贝？参与发现？）全空白 | 补设计：新增 FR（P0）、字符串加 `"inproc"`、定义 `listen_addr` 语义、补 AC、工作量拆行、明确仍走帧层 | **C**（§7-V3）；**已处置 2026-10-21**：FR-3.5–3.10 + AC-80–82；字符串加 `"inproc"`；**只要求「结构同构」**（帧边界/顺序号/大小校验保留，允许移动不拷贝），不强制逐字节走同一条编码路径 |
 | D-04 | B0 | `docs/api/c-abi.md` §9.6 C7 / C11 | 审计契约 **C7 与 C11 的正文在冒号处截断**（“顺序固定为：”“两种路径：”后无内容），AC-56/AC-63 依赖它们 | 补设计（M0 前）：写出完整审计状态机与两条 close 路径；`runtime_destroy` 不产生（与 C9 一致） | **C**（§7-V4） |
-| D-05 | B1 | `docs/architecture.md` §6.4、M4 行；`docs/requirements.md` FR-1.4/1.5、AC-11 | 跨进程名字表（FR-1.4/1.5 的实现基础）无里程碑承接；AC-11 错挂 M4 且 M4 产出清单不含实现项 | 补设计：名字表写进 M1 产出（或新增 M1.5），AC-11 移回 M1/M2；补“允许第二实例 + 改名”的 AC | **C**（**成立，仍未处置**：跨进程名字表（架构 §6.4）不在 M1 产出里；AC-11 验的是跨进程三态，却挂在 M4，而 M4 产出清单不含名字表实现） |
-| D-06 | B2 | `docs/architecture.md:272`、`:282`；`docs/requirements.md:73`（FR-4.3） | 线格式只有“头部定长 + TLV”一句话：magic、版本、长度前缀宽度/端序、帧头字段编码、TLV 标签表、最大帧、`TOO_LARGE` 判定点、双版本共存全未定义 | 补设计（M2 前）：新增 `docs/api/wire-format.md`；补新旧 TLV 互发 AC | **C**（成立：`docs/api/` 只有 `c-abi.md`，线格式确无定义。**仍未处置**——属 M2 前补 `wire-format.md`） |
+| D-05 | B1 | `docs/architecture.md` §6.4、M4 行；`docs/requirements.md` FR-1.4/1.5、AC-11 | 跨进程名字表（FR-1.4/1.5 的实现基础）无里程碑承接；AC-11 错挂 M4 且 M4 产出清单不含实现项 | 补设计：名字表写进 M1 产出（或新增 M1.5），AC-11 移回 M1/M2；补“允许第二实例 + 改名”的 AC | **C**（已处置 2026-10-22：名字表落 **M1** 产出，AC-11 移到 M1；新增 AC-89。**口径（选项 A）**：端点名的跨进程排他**与传输无关**，inproc 端点同样参与；FR-3.6 的「跨进程隔离」只指 `listen_addr`） |
+| D-06 | B2 | `docs/architecture.md:272`、`:282`；`docs/requirements.md:73`（FR-4.3） | 线格式只有“头部定长 + TLV”一句话：magic、版本、长度前缀宽度/端序、帧头字段编码、TLV 标签表、最大帧、`TOO_LARGE` 判定点、双版本共存全未定义 | 补设计（M2 前）：新增 `docs/api/wire-format.md`；补新旧 TLV 互发 AC | **C**（已处置 2026-10-22：新建 `docs/api/wire-format.md`——magic / `version` / 端序标志 / 24 B 帧头 / TLV tag 表 / 心跳 payload / 未知 tag 跳过 / 版本协商；定为 M2 硬前置） |
 
 ## 2. 断链（B3–B4）
 
 | ID | 严重度 | 位置 | 问题摘要 | agent 建议处置 | 状态 |
 |---|---|---|---|---|---|
-| D-07 | B3 | `docs/requirements.md:86`；`docs/api/c-abi.md:769-772` | FR-5.5 三件事混一条 P1：连接表 dump、队列水位、“最后 N 条错误”；错误环/容量/JSON 键名/版本全未定义 | 拆分：dump 留 v1 并定义 JSON 格式；错误环降 v1.1 | **C**（成立：FR-5.5 三合一 P1；`iocomm_diagnostic_dump` 只写「返回 JSON」，无键名/版本定义。**仍未处置**） |
+| D-07 | B3 | `docs/requirements.md:86`；`docs/api/c-abi.md:769-772` | FR-5.5 三件事混一条 P1：连接表 dump、队列水位、“最后 N 条错误”；错误环/容量/JSON 键名/版本全未定义 | 拆分：dump 留 v1 并定义 JSON 格式；错误环降 v1.1 | **C**（已处置 2026-10-22：FR-5.5 拆为 v1（连接表 + 队列水位）与 FR-5.5b（最后 N 条错误，v1.1）；`diagnostic_dump` 注明顶层含 `"version"`） |
 | D-08 | B3 | `docs/requirements.md:286`（AC-64）、`:290`（AC-68）；`docs/architecture.md:424`、`:428` | AC-64 测 v1.1 的 LOST 槽机制、AC-68 测 v1.1 的 TTL 释放，却挂在 v1 的 M3 | 修映射：AC-68 移 M7 并标〔v1.1〕；AC-64 拆 a/b 或整条移 M7 | **R**（**推翻**：`FR-10.8` 的 LOST 槽是 **P0**，`monitor_ttl_ms` 也不是 v1.1（v1.1 只有载荷捕获的 TTL）。AC-64 唯一真实问题是覆盖列误写里程碑 `M4` → 已改为 `FR-10.8 / C4`） |
-| D-09 | B3 | `docs/api/c-abi.md:911`、`:921-924`；`docs/requirements.md:294`（AC-72） | 监控内存模型未定稿：“open 时预分配”与“动态工作集 + 耗尽回收”两套写法并存 | 定稿为「逻辑配额 + 按需分配」（`max_bytes` 为记账上限，`monitor_budget_bytes` 为已提交配额之和） | **C**（**成立，仍未处置**：§9.3 同时写「`monitor_open` 预留 `max_bytes + 1 条`」与「记录离开 retain_window 后释放、字节归还」「库按此自动收紧」，预分配口径与按需工作集口径并存） |
+| D-09 | B3 | `docs/api/c-abi.md:911`、`:921-924`；`docs/requirements.md:294`（AC-72） | 监控内存模型未定稿：“open 时预分配”与“动态工作集 + 耗尽回收”两套写法并存 | 定稿为「逻辑配额 + 按需分配」（`max_bytes` 为记账上限，`monitor_budget_bytes` 为已提交配额之和） | **C**（已处置 2026-10-22：定稿为「**逻辑配额 + 按需分配**」——`max_bytes` 是记账上限不是预留量；`monitor_budget_bytes` 是各 monitor 已提交配额之和；记录离开 `retain_window` 归还字节） |
 | D-10 | B3 | `docs/architecture.md:356`、`:361` | 架构/里程碑引用的 `run_until` 与 `pending_timer_count` 在 C ABI 中不存在 | `run_until` 删除；`pending_timer_count` 若只服务测试则删/改为测试接口 | **C**（§7-V6） |
 | D-11 | B3 | `docs/api/c-abi.md:636-637`；`docs/architecture.md:314/317/78` | `registry_plugin` 三处残留（字段、插件点、`local-registry` 策略名），无 FR/AC/里程碑/加载语义 | 删除（v1）；架构表格行标「v2 评估项」 | **C**（已处置 2026-10-21：删除 `discovery_config.registry_plugin`；架构表改为「v2 评估项」） |
 | D-12 | B3 | `docs/architecture.md:321`、`:425`；`docs/api/c-abi.md:685-697`；`docs/requirements.md:260`（AC-38） | discovery 快照四函数（`take/count/get/release`）有 API 无 FR/AC；`release` 非幂等 `STALE_HANDLE` 语义未验收 | 补 FR-2.8 + 3 条 AC（空快照 / index 越界 / release 后使用），写入 M4 产出 | **C**（已处置 2026-10-21：新增 FR-2.8 + AC-87，M4 验收补 AC-87） |
-| D-13 | B3/B2 | `docs/api/c-abi.md:277`；`docs/requirements.md:46` | `ICOMM_ENDPOINT_LOCAL` 标志无 FR、无语义，与 `publish_local` / `listen_transport` 关系未定义 | 推荐删除 v1 该标志（本机可见性已可由 transport + `publish_local` 表达） | **C**（成立：`ICOMM_ENDPOINT_LOCAL` 在 `c-abi.md:311` 有定义，`requirements.md` 全文 0 命中。**仍未处置**） |
+| D-13 | B3/B2 | `docs/api/c-abi.md:277`；`docs/requirements.md:46` | `ICOMM_ENDPOINT_LOCAL` 标志无 FR、无语义，与 `publish_local` / `listen_transport` 关系未定义 | 推荐删除 v1 该标志（本机可见性已可由 transport + `publish_local` 表达） | **C**（已处置 2026-10-22：删除 `ICOMM_ENDPOINT_LOCAL`） |
 | D-14 | B4 | `docs/requirements.md:33`；`docs/api/c-abi.md:153`、`:239` | FR-1.7 `max_handles` 有字段有 FR，无 AC | 补 AC（`max_handles=1` 时第二个 create 返回 `RESOURCE_EXHAUSTED`），归 M1 | **C**（已处置 2026-10-21：新增 AC-84，归 M1） |
 | D-15 | B4 | `docs/requirements.md:58`；`docs/platform-support.md:114` | FR-3.4 崩溃残留清理提到“共享内存段”，但后端里没有共享内存 | 改措辞为「Unix socket 文件 / 命名管道实例」；补 kill -9 后重建 AC | **C**（已处置 2026-10-21：FR-3.4 改措辞为「Unix socket 文件 / 命名管道实例」；新增 AC-88） |
-| D-16 | B4 | `docs/requirements.md:122`；`docs/architecture.md:190` | FR-9.3 同机多进程共享身份只有 `process_epoch` 一句，不在任何 C 结构体里，无 AC | 降级 v1.1，或 `node_info`/`peer_info` 尾部追加 `process_epoch` + AC | **C**（成立：`process_epoch` 只出现在 `architecture.md:190` 一句，任何 C 结构体都没有。**仍未处置**——需决定降 v1.1 还是补字段） |
+| D-16 | B4 | `docs/requirements.md:122`；`docs/architecture.md:190` | FR-9.3 同机多进程共享身份只有 `process_epoch` 一句，不在任何 C 结构体里，无 AC | 降级 v1.1，或 `node_info`/`peer_info` 尾部追加 `process_epoch` + AC | **C**（已处置 2026-10-22：**降 v1.1**。v1 语义定为「`node_id` 唯一标识一个 Runtime 实例，同机多进程各自独立」，故 v1 不需要 `process_epoch`） |
 | D-17 | B4 | `docs/requirements.md:41`、`:265` | FR-2.1 无任何 AC 在覆盖列引用（被 AC-21 间接覆盖） | 在 AC-21 覆盖列补 `FR-2.1`（不新增测试） | **C**（已处置 2026-10-21：AC-21 覆盖列补 FR-2.1） |
 | D-18 | B4 | `docs/requirements.md:43`、`:265` | FR-2.3 租约无 AC（续期不重复 JOINED、到期剔除） | 补 AC：`discovery_lease_ms=3000`，正常续期只一次 JOINED；停掉后 ≤ lease 产生 LEFT 且快照移除；归 M4 | **C**（已处置 2026-10-21：新增 AC-85，归 M4） |
 | D-19 | B4 | `docs/requirements.md:27`、`:256` | FR-1.1 无 AC 引用（AC-34/AC-25 隐含 create 成功） | AC-34 覆盖列加 FR-1.1，并补“句柄非 0 且 `endpoint_name_state=HELD_BY_SELF`” | **C**（已处置 2026-10-21：AC-34 覆盖列补 FR-1.1） |
@@ -60,18 +60,18 @@
 |---|---|---|---|---|---|
 | B-01 | 高 | `docs/requirements.md:72`；`docs/api/c-abi.md:260`；`IoComm/README.md`、`docs/architecture.md:23/42/77` | UDP 只有一行 P1，无 AC/里程碑；但 `listen_transport` 与架构图把它当已规划传输 | 降级 v1.1；字符串改为 `/* "tcp"/"unix"/"pipe"/"inproc"（v1）; "udp"（v1.1） */` | **C**（§7-V8） |
 | B-02 | 高 | `docs/architecture.md:422`；`docs/api/c-abi.md:260` | 与 D-03 同根因（按矛盾的视角描述） | 见 D-03 | **C**（与 D-03 同根因；已随 D-03 处置） |
-| B-03 | 高 | `docs/requirements.md:141-149`；`docs/api/c-abi.md:34-35/869-897/1000-1024` | FR-10.9–10.17 标 v1.1，但对应 API 全以 v1 形态存在且无版本标注 | 给 v1.1 类型/函数加〔v1.1〕；§10 补 MINOR 提升时机 | **C**（成立：v1.1 的 `max_payload_bytes` 等字段与 `capture_set` 无版本标注。已部分处置 2026-10-21：在 `c-abi.md` §9.3 / §9.4 加〔v1.1〕块注释；**仍未处置**：`monitor_config` 其余载荷字段、`monitor_dump` 家族仍无逐字段标注） |
+| B-03 | 高 | `docs/requirements.md:141-149`；`docs/api/c-abi.md:34-35/869-897/1000-1024` | FR-10.9–10.17 标 v1.1，但对应 API 全以 v1 形态存在且无版本标注 | 给 v1.1 类型/函数加〔v1.1〕；§10 补 MINOR 提升时机 | **C**（已处置 2026-10-22：`c-abi.md` §9.0 新增「v1 / v1.1 归属」表作为唯一权威，不再逐字段加注） |
 | B-04 | 高 | `docs/requirements.md:149`；`docs/api/c-abi.md:155-156/926-927` | FR-10.17 标 v1.1，但预算字段与 open 时预算检查是 v1 行为 | 提前到 v1（P0）；AC-71 拆 a（v1）/b（v1.1 arena/key 部分） | **C**（已处置 2026-10-21：FR-10.17 预算部分改 P0、arena 部分 P1；AC-71 拆 a/b） |
 | B-05 | 中 | `docs/requirements.md:270`（AC-48）、`:290`（AC-68）；`docs/architecture.md:419-428` | 覆盖列引用不存在的里程碑 `M8` / `M11` | AC-48 → M7；AC-68 → M7 加〔v1.1〕 | **C**（已处置：AC-48 / AC-68 的 `M8` / `M11` 已改为 `C8` / `C11`） |
 | B-06 | 中 | `docs/requirements.md:286`；`docs/architecture.md:424/467` | AC-64 无〔v1.1〕却挂 M3 | 见 D-08 | **R**（**推翻**：与 D-08 同根因，前提不成立——见 D-08） |
 | B-07 | 中 | `docs/api/c-abi.md:800` vs `:489-504`；`docs/requirements.md:263` | `ICOMM_DROP_TIMEOUT` 触发条件不存在 | 见 D-01 | **C**（已处置 2026-10-21，随 D-01） |
-| B-08 | 中 | `docs/api/c-abi.md:246` vs `:241-242` | `discovery_config` 说心跳/租约“不参与版本协商以外的任何逻辑”，但 §5.0 正在规定其逻辑 | 改措辞：作为 `discovery_start` 初值，之后由 `tune_config` 覆盖 | **C**（成立：`c-abi.md` §5.0 规则 2 说 `discovery_config` 的心跳/租约「不参与版本协商以外的任何逻辑」，而 `iocomm_discovery_start` 正用它们初始化。措辞自相矛盾，**仍未处置**） |
-| B-09 | 中 | `docs/api/c-abi.md:911` vs `:921-924` | 监控内存模型两套写法（与 D-09 同根因） | 见 D-09 | **C**（与 D-09 同根因，成立，仍未处置） |
-| B-10 | 中 | `docs/api/c-abi.md:923-924` | v1 `max_bytes` 默认值写“待定”，却位于权威契约 | 定死默认值并删候选句（agent 建议 `min(4 MiB, ring_capacity × sizeof(record))`） | **C**（成立：§9.3 的 `max_bytes` 默认值虽已写 4 MiB，但紧接一段仍写「若要更省的默认值，v1 可将默认改为…」——两套候选并存。**仍未处置**） |
+| B-08 | 中 | `docs/api/c-abi.md:246` vs `:241-242` | `discovery_config` 说心跳/租约“不参与版本协商以外的任何逻辑”，但 §5.0 正在规定其逻辑 | 改措辞：作为 `discovery_start` 初值，之后由 `tune_config` 覆盖 | **C**（已处置 2026-10-22：§5.0 规则 2 改为「`discovery_start` 时的初值，之后由 `tune_config` 覆盖」，删掉「不参与版本协商以外的任何逻辑」） |
+| B-09 | 中 | `docs/api/c-abi.md:911` vs `:921-924` | 监控内存模型两套写法（与 D-09 同根因） | 见 D-09 | **C**（已处置 2026-10-22，随 D-09） |
+| B-10 | 中 | `docs/api/c-abi.md:923-924` | v1 `max_bytes` 默认值写“待定”，却位于权威契约 | 定死默认值并删候选句（agent 建议 `min(4 MiB, ring_capacity × sizeof(record))`） | **C**（已处置 2026-10-22：`max_bytes` 默认值**定死 4 MiB**，删除「可改为 `ring_capacity × sizeof(record)`」候选句） |
 | B-11 | 中 | `docs/requirements.md:248`；`docs/api/c-abi.md:463-466`；`docs/architecture.md:291` | AC-26 说 `BLOCK` 退化为 `ERROR`，ABI 实际返回 `WOULD_BLOCK` | 统一术语：AC-26 改为“退化为 `ICOMM_OVERFLOW_ERROR` 策略，返回 `ICOMM_ERR_WOULD_BLOCK` 并计入 `queue_dropped`” | **C**（已处置 2026-10-21：`ICOMM_OVERFLOW_BLOCK` 注释改为「退化为 **ERROR 策略**（返回/回调 `WOULD_BLOCK`）」，与 AC-26 术语对齐） |
 | B-12 | 中 | `IoComm/README.md:86` vs `docs/api/c-abi.md:489-495` | README 快速开始的 `conn_send_async` 调用与签名不一致 | 按签名改正 | **R**（**推翻**：README:91 的 `iocomm_conn_send_async(rt, conn, &opt, msg, on_done, u, &op, &err)` 与真实签名**参数个数与顺序一致**；`msg` 是未定义的示例变量，不是「签名不一致」） |
-| B-13 | 中 | `docs/platform-support.md:17`；`IoComm/README.md:131` 附近 | ARM64 Windows 标 Tier 1 却“暂不列入范围” | Tier 列改「—（不在产品范围）」或明确“工具链 Tier 1、产品不承诺” | **C**（成立：`platform-support.md:18` 把 ARM64 Windows 标 **Tier 1**，同一行写「暂不列入范围」；`README.md` 平台表写「暂不支持」。**仍未处置**） |
-| B-14 | 低 | `docs/platform-support.md:16` | MinGW 标 Tier 1 但“可选；需自测” | 推荐删除该行；或标“可选/不承诺”并补 MinGW 构建 AC-P6 | **C**（成立：`platform-support.md:17` MinGW 标 **Tier 1**，同一行写「可选；需自测」。**仍未处置**） |
+| B-13 | 中 | `docs/platform-support.md:17`；`IoComm/README.md:131` 附近 | ARM64 Windows 标 Tier 1 却“暂不列入范围” | Tier 列改「—（不在产品范围）」或明确“工具链 Tier 1、产品不承诺” | **C**（已处置 2026-10-22：ARM64 Windows Tier 列改「—（不在产品范围）」，说明改「工具链可构建，但不承诺、不验收」） |
+| B-14 | 低 | `docs/platform-support.md:16` | MinGW 标 Tier 1 但“可选；需自测” | 推荐删除该行；或标“可选/不承诺”并补 MinGW 构建 AC-P6 | **C**（已处置 2026-10-22：删除 MinGW 行） |
 | B-15 | 低 | `docs/adr/ADR-001-language-and-platform.md:90`；`IoComm/README.md`、`docs/architecture.md:154` | ADR“tokio 只作可选 feature” vs README/架构“不绑 tokio” | ADR 改为“不进入核心依赖，至多用于基准/示例”或删除 | U |
 | B-16 | 低 | `docs/adr/ADR-001-language-and-platform.md:92`；`docs/architecture.md:40` | ADR 依赖清单有 `socket2`，架构的 crate 依赖没有 | 补表或从 ADR 删除 | U |
 
@@ -141,9 +141,12 @@
 | 结论 | 条目 |
 |---|---|
 | **R（3）** | D-08、B-06（前提不成立：LOST 槽是 P0，`monitor_ttl_ms` 不是 v1.1）；B-12（README 调用的参数个数与顺序与签名一致） |
-| **C 已处置（25）** | D-01、D-02、D-03、D-04、D-11、D-12、D-14、D-15、D-17、D-18、D-19、D-20、D-21、D-22、D-23、D-24、B-01、B-02、B-04、B-05、B-07、B-11、B-15、B-16、B-03（部分：加〔v1.1〕块注释） |
-| **C 仍待处置（12）** | D-05（名字表无里程碑承接）、D-06（无线格式文档）、D-07（FR-5.5 三合一 + dump 格式未定义）、D-09 / B-09（监控内存两套口径）、D-13（`ICOMM_ENDPOINT_LOCAL` 无 FR）、D-16（`process_epoch` 不在 C 结构体）、B-03（残余：逐字段 v1.1 标注）、B-08（发现配置措辞自相矛盾）、B-10（`max_bytes` 默认值两套候选）、B-13 / B-14（平台矩阵 Tier 与说明矛盾） |
+| **C 已处置（25，2026-10-21）** | D-01、D-02、D-03、D-04、D-11、D-12、D-14、D-15、D-17、D-18、D-19、D-20、D-21、D-22、D-23、D-24、B-01、B-02、B-04、B-05、B-07、B-11、B-15、B-16、B-03（部分） |
+| **C 已处置（12，2026-10-22）** | D-05、D-06、D-07、D-09、D-13、D-16、B-03（收尾：改为 §9.0 归属表）、B-08、B-09、B-10、B-13、B-14 |
+| **C 已处置（37）** | 全部 C 条目已在 2026-10-21 / 2026-10-22 两轮改动中处置完毕，无遗留 |
 
 > **本轮新增的 AC**：AC-83–88；**新增 FR**：FR-2.8、FR-6.8。
 > **与 agent 结论不同的两条**：D-08 / B-06 判 **R**（agent 把 P0 特性当成 v1.1）；B-12 判 **R**（实为示例变量未定义，不是签名不一致）。
 
+> **2026-10-22 补充**：M1 新增「跨进程名字表（§6.4）」产出，AC-11 由 M4 移到 M1，新增 AC-89；
+> 新建 `docs/api/wire-format.md`（D-06）；`MAX_BYTES` 默认值定死；平台矩阵删除 MinGW、ARM64 Windows 改为不在产品范围。

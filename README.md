@@ -122,6 +122,7 @@ iocomm_runtime_destroy(rt);
 | [产品需求](docs/requirements.md) | 需求原文、功能拆解、验收标准、非目标 |
 | [架构设计](docs/architecture.md) | 分层、模块、线程模型、可插拔点 |
 | [C ABI 契约](docs/api/c-abi.md) | 类型、句柄、错误码、版本协商、回调规则、消息监控 |
+| [线格式](docs/api/wire-format.md) | 帧边界、帧头、TLV 扩展区、心跳 payload、版本协商 |
 | [平台支持](docs/platform-support.md) | OS × 架构矩阵、构建基线、平台差异 |
 | [待核实问题](docs/open-questions.md) | 文档审计发现的断链与口径矛盾（**未经核实**，处理前先看状态列） |
 | [ADR-001](docs/adr/ADR-001-language-and-platform.md) | 语言、平台、边界的决策与依据 |

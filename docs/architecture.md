@@ -64,7 +64,7 @@ poll（任意线程，同一 monitor 串行）→ 取记录 → 调用方消费
 | 零同步 I/O | 热路径只写定长记录 + 可选 memcpy 进 arena |
 | 独立队列 | 每监控者一个 SPSC 环，生产端 loop 线程 |
 | 载荷捕获 | 深拷贝进监控自有 arena（不共享传输缓冲） |
-| arena 预分配 | 在 `monitor_open` 时按**工作集**预留 `max_bytes`；`max_total_bytes` 是**累计配额、不参与预分配**。受 `runtime_config.monitor_budget_bytes`（默认 64 MiB）约束，超预算返回 `RESOURCE_EXHAUSTED`；热路径不分配 |
+| 监控内存模型 | **逻辑配额 + 按需分配**：`max_bytes` 是**记账上限**，不是预留量；`monitor_budget_bytes` 是各 monitor **已提交配额之和**。记录与槽位按需分配、离开 `retain_window` 时归还（AC-72 的前提）。v1.1 的载荷 arena 仍按工作集预分配。超预算（配额之和）返回 `RESOURCE_EXHAUSTED`；热路径不分配 |
 | 事件来源 | `core` 定义 `MonitorSink` trait；会话/传输在打点处调用它，**`core` 不依赖域 crate** |
 | poll 线程 | 只读私有环、不依赖 loop 推进，故 loop 线程也允许 `timeout_ms=0` 的非阻塞 poll |
 | 视图保留 | 记录被 poll 取出后，其**槽位与 arena 块**在 `retain_window` 次 poll 内不复用（消费端持有引用计数） |
@@ -187,7 +187,8 @@ NodeId = u64
 
 - 配置入口：`iocomm_runtime_config.node_id`（0 = 自动）。
 - 自动模式下，库在 `state_dir` 下读写 `node_id` 文件；`state_dir` 通过配置指定。
-- **不依赖随机 UUID 的字节级唯一性**——同一机器上的多个进程共享同一 NodeId 时，用 `(NodeId, process_epoch)` 区分；`process_epoch` 是进程启动时生成的随机值，只用于区分「同机不同进程实例」，不参与「同一逻辑节点」的判断。
+- **v1 语义：`NodeId` 唯一标识一个 Runtime 实例**，同机多进程各自拥有独立 NodeId（不共享）。
+  「同机多进程共享主机身份、用 `(NodeId, process_epoch)` 区分」是 **v1.1** 的扩展（FR-9.3），v1 不实现 `process_epoch`，任何 C 结构体里也没有这个字段。
 
 ### 5.2 对象模型：端点 / 连接 / 订阅
 
@@ -343,7 +344,7 @@ Message {
 | **本机 IPC（unix/pipe）** | 复用同一套名字锁；实际 socket 文件放 `/run/iocomm/` 或命名管道，不在 `/tmp` |
 
 **规则**：
-- **默认所有具名端点都做跨进程唯一性检查**（不要求 `UNIQUE` 标志）；`UNIQUE` 只影响「重复注册时是拒绝还是允许第二实例」。若允许第二实例，第二实例收到 `CONFLICT` 但可改名为 `<name>#<pid>` 继续。
+- **默认所有具名端点都做跨进程唯一性检查**（不要求 `UNIQUE` 标志），**与传输后端无关**——inproc 端点同样参与（inproc 的「跨进程隔离」只针对它自己的 `listen_addr`，见 [FR-3.6](requirements.md)）；`UNIQUE` 只影响「重复注册时是拒绝还是允许第二实例」。若允许第二实例，第二实例收到 `CONFLICT` 但可改名为 `<name>#<pid>` 继续。
 - 名字 → 锁的映射用**稳定哈希**（同一名字在同一机器上恒定）。
 - **残留处理**：Linux 抽象命名空间与 Windows 命名对象都由内核在进程退出时回收，**不需要手工清理**；pathname socket 的残留清理见 [平台支持 §3.2](platform-support.md)。
 - 判定结果不是原子的：`name_state()` 查询与随后 `create()` 之间存在 TOCTOU 窗口。**`create()` 的返回值才是权威**，`name_state()` 仅用于诊断与友好提示。
@@ -435,10 +436,10 @@ enum ErrorCode {
 | # | 里程碑 | 产出 | 验收 |
 |---|---|---|---|
 | **M0** | 骨架 | C ABI 头（C99 可编译）+ crate 划分 + CI 三平台构建 | AC-P1 / AC-P5 / AC-18 / AC-24 / AC-35 |
-| **M1** | inproc 闭环 | 句柄表（代际）+ Runtime + 端点/连接模型 + `inproc` 传输（FR-3.5–3.10） | AC-4 / AC-25 / AC-32 / AC-33 / AC-36 / AC-40 / AC-80 / AC-81 / AC-82 |
-| **M2** | TCP + 双向 | tcp 传输 + accept + connect + send/recv/subscribe + 异步排队超时 | AC-1 / AC-2 / AC-10 / AC-29 / AC-30 / AC-31 / AC-33b / AC-39 / AC-73 / AC-74 / AC-75 / AC-76 / AC-77 / AC-78 |
+| **M1** | inproc 闭环 | 句柄表（代际）+ Runtime + 端点/连接模型 + **跨进程名字表（§6.4）** + `inproc` 传输（FR-3.5–3.10） | AC-4 / AC-11 / AC-25 / AC-32 / AC-33 / AC-36 / AC-40 / AC-80 / AC-81 / AC-82 / AC-89 |
+| **M2** | TCP + 双向 | tcp 传输 + accept + connect + send/recv/subscribe + 异步排队超时 + **[线格式](api/wire-format.md)** | AC-1 / AC-2 / AC-10 / AC-29 / AC-30 / AC-31 / AC-33b / AC-39 / AC-73 / AC-74 / AC-75 / AC-76 / AC-77 / AC-78 |
 | **M3** | 状态与监控 | 心跳 + 条件集 + 指标 + 诊断 + **消息监控（信封级）** | AC-3 / AC-5 / AC-6 / AC-12 / AC-13 / AC-15 / AC-20 / AC-27 / AC-28 / AC-37 / AC-41 / AC-42 / AC-43 / AC-44 / AC-45 / AC-53 / AC-55 / AC-57 / AC-58 / AC-59 / AC-64 / AC-68 / AC-71 / AC-72 |
-| **M4** | 发现 | 组播 + 单播 seed + 节点身份 + 阶段二端点能力 | AC-7 / AC-9 / AC-11 / AC-14 / AC-16 / AC-21 / AC-22 / AC-23 / AC-34 / AC-38 / AC-79 |
+| **M4** | 发现 | 组播 + 单播 seed + 节点身份 + 阶段二端点能力 | AC-7 / AC-9 / AC-14 / AC-16 / AC-21 / AC-22 / AC-23 / AC-34 / AC-38 / AC-79 |
 | **M5** | 本机 IPC | Linux unix socket + Windows 命名管道 | AC-P3 / AC-8 / AC-17 / AC-19 / AC-26 |
 | **M6** | 平台与加固 | 麒麟/UOS 实机 + glibc 2.17 基线 + soak | AC-P1 / AC-P2 / AC-P3 / AC-P4 / AC-P5 / AC-E1 / AC-E2 / AC-E3 / AC-E4 / AC-E5 / AC-E6 |
 | **M7** | **v1.1** 载荷捕获与审计 | arena / 限速 / 双 TTL / dump / 审计 sink 回调（`audit_fn`）/ SLOW | AC-46 / AC-47 / AC-48 / AC-49 / AC-50 / AC-51 / AC-52 / AC-54 / AC-56 / AC-60 / AC-61 / AC-62 / AC-63 / AC-65 / AC-67 / AC-69 / AC-70 / AC-71b |
@@ -469,6 +470,7 @@ M0 ──► M1 ──► M2 ──┬──► M3
 | core（loop / 计时器 / 句柄表 / 缓冲） | 15–25 | mio 之上自研 |
 | 端点 / 连接 / 会话状态机 | 20–30 | 含 accept、重连、条件集 |
 | transport: inproc | 2–3 | 进程内名字表 + 队列投递；复用帧层 |
+| **跨进程名字表（§6.4）** | **3–5** | Linux 抽象 socket / Windows 命名对象；归 M1 |
 | transport: tcp | 8–12 | |
 | transport: unix socket | 4–6 | |
 | **transport: Windows 命名管道** | **2–5**（若 mio 可用）/ **10–18**（自研） | 风险项，S2 先验证 |
@@ -480,10 +482,10 @@ M0 ──► M1 ──► M2 ──┬──► M3
 | **SLOW / 采样 / direction（P1）** | **1–2** | 配对表 + 采样 |
 | 测试基建（fake clock / fake transport / 探针） | 8–12 | |
 | 平台验证（麒麟 / UOS / WS2016 / ARM64） | 15–25 | |
-| 小计：**v1（M0–M6）** | **105–168** | 不含 v1.1 项（mio 命名管道） |
+| 小计：**v1（M0–M6）** | **108–173** | 不含 v1.1 项（mio 命名管道） |
 | 小计：**v1.1（M7）** | **8–13** | 载荷捕获 + 审计 + SLOW/采样 |
-| **合计（mio 提供命名管道）** | **113–181** | 不含 soak 与认证 |
-| **合计（自研命名管道）** | **121–194** | 同上 |
-| **小计：v1（自研命名管道）** | **113–181** | |
+| **合计（mio 提供命名管道）** | **116–186** | 不含 soak 与认证 |
+| **合计（自研命名管道）** | **124–199** | 同上 |
+| **小计：v1（自研命名管道）** | **116–186** | |
 
 > 估算为**工程判断**，非实测。S1/S2 Spike 完成后应据此修正。

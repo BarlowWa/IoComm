@@ -13,8 +13,7 @@
 | **x86_64 Linux** | `x86_64-unknown-linux-gnu` | **Tier 1** | kernel 3.2+ / glibc 2.17+ |
 | **ARM64 Linux** | `aarch64-unknown-linux-gnu` | **Tier 1** | kernel 4.1+ / glibc 2.17+ |
 | **x86_64 Windows** | `x86_64-pc-windows-msvc` | **Tier 1** | Windows 10+ / Server 2016+ |
-| x86_64 Windows（MinGW） | `x86_64-pc-windows-gnu` | Tier 1 | 可选；需自测 |
-| ARM64 Windows | `aarch64-pc-windows-msvc` | Tier 1 | 暂不列入范围 |
+| ARM64 Windows | `aarch64-pc-windows-msvc` | —（不在产品范围） | 工具链可构建，但不承诺、不验收 |
 
 ### 1.2 操作系统
 
