@@ -275,7 +275,7 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | **AC-32** | 同一接收对象上 `subscribe` 与 `recv` 同时使用，第二个调用返回 `INVALID_STATE` | 通过 | FR-6.8（实现依据 [C ABI §6.4](api/c-abi.md#64-拉取与推送的互斥规则)） |
 | **AC-33** | `accept` 回调返回时既未 `conn_retain` 也未 `conn_subscribe` 的连接被自动收回（连接数回到 0，对端观测到优雅 FIN 而非 RST） | 通过 | FR-8.5 / FR-8.8 |
 | **AC-33b** | 回调内显式 `conn_destroy` 拒绝同样以 FIN 关闭；`conn_abort` 才产生 RST | 通过 | FR-8.8 / FR-8.9 |
-| **AC-34** | 按名字查询 / 枚举端点返回正确结果；不存在时返回 `NOT_FOUND` | 通过 | FR-1.3 |
+| **AC-34** | `endpoint_create` 返回非 0 句柄，且 `endpoint_name_state` 为 `HELD_BY_SELF`；按名字查询 / 枚举端点返回正确结果；不存在时返回 `NOT_FOUND` | 通过 | FR-1.1 / FR-1.3 |
 | **AC-35** | 三项静态检查全过：① 所有句柄最终 typedef 为 `uint64_t`（经 `iocomm_handle_t` 间接亦算），声明中无 `void*` 句柄；② **声明部分**（结构体字段 + 函数参数 + 返回值，排除注释）无 `long` / `size_t` / `bool`；③ **cdylib** 的公开 API 符号均为 `iocomm_*`（Linux `nm -D`，Windows `dumpbin /exports`；M0 先取实际清单，必要时给白名单）；staticlib 不做此检查 | 通过 | FR-7.1 / FR-7.4 / FR-7.6 |
 | **AC-36** | 把 `conn` 句柄传给 `endpoint_*` 函数返回 `STALE_HANDLE`（不误用） | 通过 | FR-1.6 |
 | **AC-37** | `log_fn != NULL` 时，`runtime_start` 后环境指纹**恰好输出一次**（P1） | 通过 | FR-5.7 |
@@ -325,13 +325,14 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | **AC-80** | 同一进程内两个 Runtime 以 `inproc` 建连并双向收发，字节完全一致；接收回调**不在发送者的调用栈上执行**（回调内读取线程 id 校验） | 通过 | FR-3.5 / FR-3.7 |
 | **AC-81** | 同进程内重复 `inproc` 名字 → `ALREADY_EXISTS`；两个进程用同一名字互不可见 | 通过 | FR-3.6 |
 | **AC-82** | inproc 上超 `max_message_size` 的发送返回/回调 `TOO_LARGE`（与 tcp 一致）；`publish_local=1` + `inproc` → `INVALID_ARGUMENT` | 通过 | FR-3.8 / FR-3.9 |
-| **AC-88** | 对端进程被 `kill -9`：≤ N 秒产生断开事件；随后对端重启并重新 `listen` 同一 pathname socket / 管道名，**无需人工删除残留文件即成功** | 通过 | FR-3.3 / FR-3.4 |
-| **AC-89** | 两进程同时注册同名端点：非 `UNIQUE` 时第二实例 `create` 返回 `CONFLICT`，改名为 `<name>#<pid>` 后成功；`UNIQUE` 时直接拒绝 | 通过 | FR-1.4 / FR-1.5 |
 | **AC-83** | owned 模式：主线程**从不调用** `run_once` 也能完成一次建连 + 往返收发；IO 线程恒为 1（子进程内枚举线程数验证） | 通过 | FR-6.5 |
 | **AC-84** | `max_handles = 1` 时，第二次 `endpoint_create` 返回 `RESOURCE_EXHAUSTED`（不崩溃、不静默失败） | 通过 | FR-1.7 |
 | **AC-85** | `discovery_lease_ms = 3000`：正常心跳续期只产生一次 `JOINED`；停掉对端后 ≤ lease 产生一次 `LEFT`，且快照中该节点被移除 | 通过 | FR-2.3 |
 | **AC-86** | `FR-5.1` 四条件：建连前 `connected = UNKNOWN`；建连成功后 `connected = TRUE`、`lively = TRUE`；`runtime_reconfigure` 后 `config_current` 由 `FALSE` 变 `TRUE` | 通过 | FR-5.1 |
 | **AC-87** | 发现快照：空快照 `count == 0` 且 `get(0)` 返回 `NOT_FOUND`；`index` 越界返回 `NOT_FOUND`；`release` 后再次 `release` 或任意 `get` 返回 `STALE_HANDLE` | 通过 | FR-2.8 |
+| **AC-88** | 对端进程被 `kill -9`：≤ N 秒产生断开事件；随后对端重启并重新 `listen` 同一 pathname socket / 管道名，**无需人工删除残留文件即成功** | 通过 | FR-3.3 / FR-3.4 |
+| **AC-89** | 两进程同时注册同名端点：非 `UNIQUE` 时第二实例 `create` 返回 `CONFLICT`，改名为 `<name>#<pid>` 后成功；`UNIQUE` 时直接拒绝 | 通过 | FR-1.4 / FR-1.5 |
+| **AC-90** | **TLV 前向兼容**：测试用 `FakeTransport` 向接收方注入一帧，帧内带一个 v1 未定义的 tag（如 `0x00FF`，长度非 0）：接收方**正常投递**该消息、payload 与该帧里的一致、连接**不关闭**；同一帧去掉未知 tag 后结果完全相同（对照组）。再把该 tag 的 `len` 改成越界值 → 连接关闭并报帧损坏 | 通过 | [线格式 §3](api/wire-format.md#3-tlv-扩展区) / FR-4.3 |
 
 ### 5.2 平台验收
 
@@ -341,7 +342,7 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | AC-P2 | ARM64 Linux 构建 + QEMU 全量测试通过；实机冒烟（跨机收发 + 发现） | 通过 |
 | AC-P3 | Windows Server 2016：命名管道 IPC + TCP 收发 + 心跳超时判定 | 通过 |
 | AC-P4 | 麒麟 V10 SP3 x86_64 / UOS 20 x86_64 实机：启动 + 同机 IPC + 跨机收发 | 通过 |
-| AC-P5 | C ABI 头用 `gcc -std=c99` 与 `g++ -std=c++17` 各编译一次 | 通过 |
+| AC-P5 | C ABI 头用 `gcc -std=c99` 与 `g++ -std=c++17` 各编译一次 | 通过（覆盖 FR-7.2） |
 
 ### 5.3 工程验收
 
@@ -363,6 +364,7 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | 2026-10-16 | 原始需求提出 |
 | 2026-10-19 | 确认：独立 IO 库 / Rust 核心 / C ABI / x86_64+ARM64 / 排除国产私有架构 |
 | 2026-10-20 | 新增 FR-10 消息级监控；移除 `ICOMM_ENDPOINT_SECRET`（监控改为独立对象） |
+| 2026-10-22 | 新增 AC-90（TLV 未知 tag 跳过的前向兼容验收，归 M2） |
 | 2026-10-22 | 完成任务 C 全部 12 条遗留：FR-3.6 限定语（inproc 隔离只指 `listen_addr`）、FR-5.5 拆分（+FR-5.5b 最后 N 条错误 → v1.1）、FR-9.3 降 v1.1（v1 的 `node_id` 标识 Runtime 实例）、新增 AC-89；新建 `docs/api/wire-format.md`（D-06）；`c-abi.md` §9.0 新增 v1/v1.1 归属表；监控内存模型定稿为「逻辑配额 + 按需分配」；删除 `ICOMM_ENDPOINT_LOCAL`；`max_bytes` 默认值定死 4 MiB；平台矩阵删 MinGW、ARM64 Windows 标为不在产品范围 |
 | 2026-10-21 | 完成任务 C 核实：40 条中 **C 37 / R 3**；本轮处置 25 条（其中新增 FR-2.8 / FR-6.8、AC-83–88），12 条仍待处置（D-05/06/07/09/13/16、B-03 残余/08/09/10/13/14）。推翻 D-08、B-06、B-12 |
 | 2026-10-21 | 落实 D-11（`registry_plugin` 删除，中心注册表标 v2 评估项） |

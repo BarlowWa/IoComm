@@ -29,7 +29,7 @@
 | D-03 | B0/B1 | `docs/architecture.md:422`（M1）、`:25/42/77/455`；`docs/api/c-abi.md:260`；`IoComm/README.md` 示意图 | `inproc` 是 M1 唯一传输，但 `requirements.md` 无 FR、无 AC，`listen_transport` 字符串也没有；语义（跨 runtime？拷贝？参与发现？）全空白 | 补设计：新增 FR（P0）、字符串加 `"inproc"`、定义 `listen_addr` 语义、补 AC、工作量拆行、明确仍走帧层 | **C**（§7-V3）；**已处置 2026-10-21**：FR-3.5–3.10 + AC-80–82；字符串加 `"inproc"`；**只要求「结构同构」**（帧边界/顺序号/大小校验保留，允许移动不拷贝），不强制逐字节走同一条编码路径 |
 | D-04 | B0 | `docs/api/c-abi.md` §9.6 C7 / C11 | 审计契约 **C7 与 C11 的正文在冒号处截断**（“顺序固定为：”“两种路径：”后无内容），AC-56/AC-63 依赖它们 | 补设计（M0 前）：写出完整审计状态机与两条 close 路径；`runtime_destroy` 不产生（与 C9 一致） | **C**（§7-V4） |
 | D-05 | B1 | `docs/architecture.md` §6.4、M4 行；`docs/requirements.md` FR-1.4/1.5、AC-11 | 跨进程名字表（FR-1.4/1.5 的实现基础）无里程碑承接；AC-11 错挂 M4 且 M4 产出清单不含实现项 | 补设计：名字表写进 M1 产出（或新增 M1.5），AC-11 移回 M1/M2；补“允许第二实例 + 改名”的 AC | **C**（已处置 2026-10-22：名字表落 **M1** 产出，AC-11 移到 M1；新增 AC-89。**口径（选项 A）**：端点名的跨进程排他**与传输无关**，inproc 端点同样参与；FR-3.6 的「跨进程隔离」只指 `listen_addr`） |
-| D-06 | B2 | `docs/architecture.md:272`、`:282`；`docs/requirements.md:73`（FR-4.3） | 线格式只有“头部定长 + TLV”一句话：magic、版本、长度前缀宽度/端序、帧头字段编码、TLV 标签表、最大帧、`TOO_LARGE` 判定点、双版本共存全未定义 | 补设计（M2 前）：新增 `docs/api/wire-format.md`；补新旧 TLV 互发 AC | **C**（已处置 2026-10-22：新建 `docs/api/wire-format.md`——magic / `version` / 端序标志 / 24 B 帧头 / TLV tag 表 / 心跳 payload / 未知 tag 跳过 / 版本协商；定为 M2 硬前置） |
+| D-06 | B2 | `docs/architecture.md:272`、`:282`；`docs/requirements.md:73`（FR-4.3） | 线格式只有“头部定长 + TLV”一句话：magic、版本、长度前缀宽度/端序、帧头字段编码、TLV 标签表、最大帧、`TOO_LARGE` 判定点、双版本共存全未定义 | 补设计（M2 前）：新增 `docs/api/wire-format.md`；补新旧 TLV 互发 AC（→ AC-90） | **C**（已处置 2026-10-22：新建 `docs/api/wire-format.md`——magic / `version` / 端序标志 / 20 B 帧头 / TLV tag 表 / `HELLO` 握手 / 心跳 payload / 未知 tag 跳过 / 版本协商；定为 M2 硬前置） |
 
 ## 2. 断链（B3–B4）
 
