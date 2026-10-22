@@ -20,9 +20,8 @@
 ├──────────────┬──────────────┬────────────────────────────┤
 │  iocomm-     │  iocomm-     │  iocomm-monitor             │
 │  transport   │  discovery   │  心跳 · 指标 · 诊断快照       │
-│  tcp/udp/    │  组播/单播    │                             │
-│  unix/pipe/  │  seed/本机    │                             │
-│  inproc      │              │                             │
+│  tcp/unix/   │  组播/单播    │                             │
+│  pipe/inproc │  seed/本机    │                             │
 ├──────────────┴──────────────┴────────────────────────────┤
 │  iocomm-core         事件循环（mio）· 计时器 · 缓冲区 ·     │
 │                      句柄表 · 会话状态机 · 错误码            │
@@ -437,9 +436,9 @@ enum ErrorCode {
 |---|---|---|---|
 | **M0** | 骨架 | C ABI 头（C99 可编译）+ crate 划分 + CI 三平台构建 | AC-P1 / AC-P5 / AC-18 / AC-24 / AC-35 |
 | **M1** | inproc 闭环 | 句柄表（代际）+ Runtime + 端点/连接模型 + **跨进程名字表（§6.4）** + `inproc` 传输（FR-3.5–3.10） | AC-4 / AC-11 / AC-25 / AC-32 / AC-33 / AC-36 / AC-40 / AC-80 / AC-81 / AC-82 / AC-83 / AC-84 / AC-89 |
-| **M2** | TCP + 双向 | tcp 传输 + accept + connect + send/recv/subscribe + 异步排队超时 + **[线格式](api/wire-format.md)** | AC-1 / AC-2 / AC-10 / AC-29 / AC-30 / AC-31 / AC-33b / AC-39 / AC-73 / AC-74 / AC-75 / AC-76 / AC-77 / AC-78 / AC-90 |
-| **M3** | 状态与监控 | 心跳 + 条件集 + 指标 + 诊断 + **消息监控（信封级）** | AC-3 / AC-5 / AC-6 / AC-12 / AC-13 / AC-15 / AC-20 / AC-27 / AC-28 / AC-37 / AC-41 / AC-42 / AC-43 / AC-44 / AC-45 / AC-53 / AC-55 / AC-57 / AC-58 / AC-59 / AC-64 / AC-68 / AC-71 / AC-72 / AC-86 |
-| **M4** | 发现 | 组播 + 单播 seed + 节点身份 + 阶段二端点能力 | AC-7 / AC-9 / AC-14 / AC-16 / AC-21 / AC-22 / AC-23 / AC-34 / AC-38 / AC-79 / AC-85 / AC-87 |
+| **M2** | TCP + 双向 | tcp 传输 + accept + connect + send/recv/subscribe + 异步排队超时 + **[线格式](api/wire-format.md)（含 HELLO 握手）** | AC-1 / AC-2 / AC-10 / AC-29 / AC-30 / AC-31 / AC-33b / AC-39 / AC-73 / AC-74 / AC-75 / AC-76 / AC-77 / AC-78 / AC-90 / AC-91 / AC-92 |
+| **M3** | 状态与监控 | 心跳 + 条件集 + 指标 + 诊断（JSON 结构见 AC-94）+ **消息监控（信封级）** | AC-3 / AC-5 / AC-6 / AC-12 / AC-13 / AC-15 / AC-20 / AC-27 / AC-28 / AC-37 / AC-41 / AC-42 / AC-43 / AC-44 / AC-45 / AC-53 / AC-55 / AC-57 / AC-58 / AC-59 / AC-64 / AC-68 / AC-71 / AC-72 / AC-86 / AC-94 |
+| **M4** | 发现 | 组播 + 单播 seed + 节点身份 + 阶段二端点能力 + **[发现线格式](api/wire-format.md#8-发现报文阶段一--阶段二)** | AC-7 / AC-9 / AC-14 / AC-16 / AC-21 / AC-22 / AC-23 / AC-34 / AC-38 / AC-79 / AC-85 / AC-87 / AC-93 |
 | **M5** | 本机 IPC | Linux unix socket + Windows 命名管道 | AC-P3 / AC-8 / AC-17 / AC-19 / AC-26 / AC-88 |
 | **M6** | 平台与加固 | 麒麟/UOS 实机 + glibc 2.17 基线 + soak | AC-P1 / AC-P2 / AC-P3 / AC-P4 / AC-P5 / AC-E1 / AC-E2 / AC-E3 / AC-E4 / AC-E5 / AC-E6 |
 | **M7** | **v1.1** 载荷捕获与审计 | arena / 限速 / 双 TTL / dump / 审计 sink 回调（`audit_fn`）/ SLOW | AC-46 / AC-47 / AC-48 / AC-49 / AC-50 / AC-51 / AC-52 / AC-54 / AC-56 / AC-60 / AC-61 / AC-62 / AC-63 / AC-65 / AC-67 / AC-69 / AC-70 / AC-71b |
@@ -469,7 +468,7 @@ M0 ──► M1 ──► M2 ──┬──► M3
 | C ABI 层 + 版本协商 + 测试 | 8–12 | 含坏对端矩阵 |
 | core（loop / 计时器 / 句柄表 / 缓冲） | 15–25 | mio 之上自研 |
 | 端点 / 连接 / 会话状态机 | 20–30 | 含 accept、重连、条件集 |
-| transport: inproc | 2–3 | 进程内名字表 + 队列投递；复用帧层 |
+| transport: inproc | 2–3 | 进程内名字表 + 队列投递；**复用消息抽象，不走线格式**（[线格式 §7](api/wire-format.md)） |
 | **跨进程名字表（§6.4）** | **3–5** | Linux 抽象 socket / Windows 命名对象；归 M1 |
 | transport: tcp | 8–12 | |
 | transport: unix socket | 4–6 | |

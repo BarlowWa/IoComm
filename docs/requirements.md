@@ -85,7 +85,7 @@
 | 编号 | 需求 | 优先级 |
 |---|---|---|
 | FR-4.1 | 跨机 TCP 通信 | P0 |
-| FR-4.2 | UDP（含组播/广播） | P1 |
+| FR-4.2 | UDP（含组播/广播） | **v1.1**（v1 的 `listen_transport` 不含 `"udp"`，见 [C ABI §5.1](api/c-abi.md)） |
 | FR-4.3 | 帧定界：有界消息，不暴露字节流 | P0 |
 | FR-4.4 | 自动重连（指数退避 + 抖动） | P0 |
 | FR-4.5 | 背压策略可配（阻塞 / 丢最旧 / 丢最新 / 报错），**按端点配置** | P0 |
@@ -165,7 +165,7 @@
 | FR-10.12 | **开启/关闭载荷捕获产生审计事件** | **v1.1** |
 | FR-10.13 | 审计事件（端点增删、连接、订阅、重配置、控制、监控开关）**不含业务载荷**；v1.1 走创建期不可变的 `audit_fn` 回调 sink，**无句柄 / 无环 / 无 poll**（ADR-002） | **v1.1**（v1 以 `log_fn` 结构化事件承担） |
 | FR-10.14 | 载荷捕获的**运行时开关**（open 后可开可关，用于限时调试） | **v1.1** |
-| FR-10.15 | **SENT 的落点定义**：仅在成功入队后产生；入队失败只产生 `DROPPED` | P0 |
+| FR-10.15 | **SENT 的落点定义**：仅在成功入队后产生（同步与异步**同口径**）。`SENT` 只表示「已入队、生成了 op_id」，**不是已送达**——其后出现 `DROPPED(TIMEOUT / PEER_GONE)` 是正常序列 | P0 |
 | FR-10.16 | **SLOW 的定义**：`RECEIVED.ts_mono - SENT.ts_mono`（同一次本端往返，适用于 `direction=BOTH`）；单侧监控不产生 SLOW | **v1.1** |
 | FR-10.17 | 监控预分配受**全局内存预算**约束（`runtime_config.monitor_budget_bytes`，默认 64 MiB），超预算返回 `RESOURCE_EXHAUSTED`。**预算字段与 open 时的检查属 v1**；v1.1 才需要的是 arena 载荷捕获部分 | **P0**（预算）/ arena 部分 P1 |
 
@@ -282,7 +282,7 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | **AC-38** | `publish_local=1` 的端点出现在 discovery 快照（本机注册表条目并入同一节点表）中，并产生 `JOINED/LEFT` 事件（P1） | 通过 | FR-2.6 |
 | **AC-39** | `connect_async(ep_owner=ep)` 建立的出站连接计入 `endpoint_send` 扇出与 `conn_count(ep)`；`ep_owner=0` 时两者均不计入 | 通过 | FR-8.6 |
 | **AC-40** | 在 accept 回调内 `conn_retain` 后，另一线程可对该入站连接 `conn_recv` 收到数据 | 通过 | FR-8.5 / FR-6.2 / FR-6.3 |
-| **AC-41** | 环**有空位**时分别诱发：队列满（`QUEUE_FULL`）、扇出无连接（`NO_SUBSCRIBER`）、异步发送超时（`TIMEOUT`）、对端已断开时发送（`PEER_GONE`）、策略 ERROR 且队列满（`BACKPRESSURE`）；各产生一条 `DROPPED` 且 `drop_reason` 正确 | 通过 | FR-10.3 |
+| **AC-41** | 环**有空位**时分别诱发：**接收**队列满（`QUEUE_FULL`）、扇出无连接（`NO_SUBSCRIBER`）、异步发送超时（`TIMEOUT`）、对端已断开时发送（`PEER_GONE`）、**发送**队列满且策略 `ERROR`（`BACKPRESSURE`，同步与异步各一次）；各产生一条 `DROPPED` 且 `drop_reason` 正确 | 通过 | FR-10.3 |
 | **AC-42** | 同一构建、同一发送脚本（≥1e6 条、固定 256 B），monitor **关闭** vs **开启但不 poll** 各 5 轮，msgs/s 中位数差值 &lt; 1% | 通过 | FR-10.5 |
 | **AC-43** | 环满时新记录**写入失败**（不覆盖），`monitor_stats.lost` 递增；每满 1024 次丢失更新预留 LOST 槽位，`degraded=1` | 通过 | FR-10.4 / FR-10.8 |
 | **AC-44** | 两个监控者配置不同（一个不读），互不影响 | 通过 | FR-10.6 |
@@ -300,7 +300,7 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | **AC-56** | 审计序列固定为 `MONITOR_OPEN` →（`max_payload_bytes>0` 时）`CAPTURE_ON` → `capture_set(on=0)` 产生 `CAPTURE_OFF` → `monitor_close` 产生 `MONITOR_CLOSE`；`audit_fn` 按此顺序收到 | 通过 | FR-10.12 / FR-10.13 | 〔v1.1〕
 | **AC-57** | manual 单线程模式下，在 loop 线程以 `timeout_ms=0` 调 `iocomm_monitor_poll` 成功返回（不返回 `WOULD_DEADLOCK`） | 通过 | FR-10.7 / FR-6.4 |
 | **AC-58** | 以 `max_payload_bytes>0` 打开 → 自动产生 `CAPTURE_ON`；`capture_set(on=0)` 产生一条 `CAPTURE_OFF`；再 `capture_set(on=1)` 产生一条 `CAPTURE_ON` | 通过 | FR-10.14 / C7 | 〔v1.1〕
-| **AC-59** | 入队失败（队列满）时**不产生 `SENT`**，只产生 `DROPPED` | 通过 | FR-10.15 |
+| **AC-59** | 入队失败（队列满）时**不产生 `SENT`**；策略为丢弃时产生 `DROPPED(QUEUE_FULL)`（接收侧）/ `DROPPED(BACKPRESSURE)`（发送侧 ERROR）| 通过 | FR-10.15 |
 | **AC-60** | `direction=BOTH`、`correlation_id != 0`、单机往返 10 ms、`slow_threshold_ms=5` → 产生 `SLOW`；`direction=OUT` 或 `correlation_id==0` 时不产生 | 通过 | FR-10.16 | 〔v1.1〕
 | **AC-61** | `audit_fn` 在多线程并发调用下无数据竞争（TSan/压力），且 `seq` 单调、无重复 | 通过 | FR-10.13 | 〔v1.1〕
 | **AC-62** | `max_payload_bytes==0` 时 `capture_set(on=1)` 返回 `INVALID_STATE` 且**不产生**审计；已开启时重复 `on=1` 不重复产生审计 | 通过 | FR-10.14 / C7 | 〔v1.1〕
@@ -333,6 +333,10 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | **AC-88** | 对端进程被 `kill -9`：≤ N 秒产生断开事件；随后对端重启并重新 `listen` 同一 pathname socket / 管道名，**无需人工删除残留文件即成功** | 通过 | FR-3.3 / FR-3.4 |
 | **AC-89** | 两进程同时注册同名端点：非 `UNIQUE` 时第二实例 `create` 返回 `CONFLICT`，改名为 `<name>#<pid>` 后成功；`UNIQUE` 时直接拒绝 | 通过 | FR-1.4 / FR-1.5 |
 | **AC-90** | **TLV 前向兼容**：测试用 `FakeTransport` 向接收方注入一帧，帧内带一个 v1 未定义的 tag（如 `0x00FF`，长度非 0）：接收方**正常投递**该消息、payload 与该帧里的一致、连接**不关闭**；同一帧去掉未知 tag 后结果完全相同（对照组）。再把该 tag 的 `len` 改成越界值 → 连接关闭并报帧损坏 | 通过 | [线格式 §3](api/wire-format.md#3-tlv-扩展区) / FR-4.3 |
+| **AC-91** | 一个**未产生 `SENT`** 的报错路径（`TOO_LARGE`、句柄无效）留有环空位：`poll` **取不到任何记录**，`monitor_stats.emitted` 不变；对照组（同样的消息在队列未满时正常发送）产生 `SENT` | 通过 | FR-10.15 / 线格式 §3 |
+| **AC-92** | `HELLO` 握手：① 双方互发 `HELLO` 后连接可用，`DATA` 正常收发；② 未发 `HELLO` 直接发 `DATA` → 对端关闭连接，`DISCONNECTED` 且**不投递**该 `DATA`；③ `min_version` 高于本端 `wire_version` → `HELLO_ACK` 后关闭；④ `HELLO` 的 TLV 区非 0 → 帧损坏，关闭连接 | 通过 | [线格式 §5](api/wire-format.md#5-hello-的-payload) |
+| **AC-93** | 发现报文编解码：对端以组播信标上报的节点表，`discovery_snapshot` 里的 `node_id` / `name` / 端点列表与发送端一致；单播 seed 路径与组播路径得到相同结果；未知字段（TLV）被跳过 | 通过 | FR-2.1 / FR-2.4 / [线格式 §8](api/wire-format.md) |
+| **AC-94** | `iocomm_diagnostic_dump` 返回的 JSON：顶层含 `"version"` 与 `"connections"` 数组；每条连接至少含 `conn` / `peer_node_id` / `connected` / `send_queue_depth` / `recv_queue_depth`；`version` 与实际实现一致 | 通过 | FR-5.5 |
 
 ### 5.2 平台验收
 
@@ -364,6 +368,7 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | 2026-10-16 | 原始需求提出 |
 | 2026-10-19 | 确认：独立 IO 库 / Rust 核心 / C ABI / x86_64+ARM64 / 排除国产私有架构 |
 | 2026-10-20 | 新增 FR-10 消息级监控；移除 `ICOMM_ENDPOINT_SECRET`（监控改为独立对象） |
+| 2026-10-22 | 收敛复查修复：① SENT 澄清为「已入队 ≠ 已送达」，同步/异步同口径（FR-10.15 / AC-59）；② `QUEUE_FULL`（仅接收侧）与 `BACKPRESSURE`（仅发送侧 ERROR）分界定死，AC-41 按方向拆分；③ `HELLO` 握手补 AC-92（M2）；④ 发现报文补线格式 §8 + AC-93（M4）；⑤ `diagnostic_dump` 定 JSON 键名 + AC-94（M3）；⑥ FR-4.2（UDP）降为 **v1.1**；⑦ `stats.audit_events` 明确 v1 计入 `log_fn` 的 AUDIT 事件；新增 AC-91（入队前失败不产生监控记录） |
 | 2026-10-22 | 新增 AC-90（TLV 未知 tag 跳过的前向兼容验收，归 M2） |
 | 2026-10-22 | 完成任务 C 全部 12 条遗留：FR-3.6 限定语（inproc 隔离只指 `listen_addr`）、FR-5.5 拆分（+FR-5.5b 最后 N 条错误 → v1.1）、FR-9.3 降 v1.1（v1 的 `node_id` 标识 Runtime 实例）、新增 AC-89；新建 `docs/api/wire-format.md`（D-06）；`c-abi.md` §9.0 新增 v1/v1.1 归属表；监控内存模型定稿为「逻辑配额 + 按需分配」；删除 `ICOMM_ENDPOINT_LOCAL`；`max_bytes` 默认值定死 4 MiB；平台矩阵删 MinGW、ARM64 Windows 标为不在产品范围 |
 | 2026-10-21 | 完成任务 C 核实：40 条中 **C 37 / R 3**；本轮处置 25 条（其中新增 FR-2.8 / FR-6.8、AC-83–88），12 条仍待处置（D-05/06/07/09/13/16、B-03 残余/08/09/10/13/14）。推翻 D-08、B-06、B-12 |

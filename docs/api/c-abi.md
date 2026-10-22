@@ -534,6 +534,10 @@ int32_t iocomm_endpoint_set_overflow(iocomm_runtime_t rt, iocomm_endpoint_t ep,
 > **接收侧**共用同一端点的策略；`BLOCK` 永不生效，`ERROR` 的语义固定为「丢弃 + 计数 + 产生
 > `DROPPED(reason = QUEUE_FULL)`」，**不关闭连接**（接收侧没有可返回失败的调用方）。
 >
+> **两个 reason 的分界（唯一口径）**：**接收队列满 → `QUEUE_FULL`**（无论策略是丢弃还是 ERROR）；
+> **发送队列满且策略为 ERROR → `BACKPRESSURE`**。两者不重叠：`QUEUE_FULL` 只出现在接收侧，
+> `BACKPRESSURE` 只出现在发送侧。
+>
 > **扇出的部分失败**：`iocomm_endpoint_send` 若只有部分连接入队成功，**返回 `ICOMM_OK`**，
 > 由 `out_delivered < N` 表达部分成功；若全部失败则返回 `ICOMM_ERR_WOULD_BLOCK`。
 > 异步 `endpoint_send_async` 同样以 `on_done(ICOMM_OK)` + 计数表达部分失败。
@@ -845,7 +849,7 @@ typedef struct iocomm_stats {
     uint64_t retransmits;          /* TCP 层重传（可读时）；否则 0 */
     uint64_t heartbeat_timeouts;
     uint64_t reconnects;
-    uint64_t audit_events;         /* 已送交 audit_fn（或回退 log_fn）的审计事件数 */
+    uint64_t audit_events;         /* 已送交 audit_fn（v1：已写 log_fn 的 AUDIT 类别）的事件数 */
 
     int64_t  send_queue_depth, recv_queue_depth;
     int64_t  open_endpoints, discovered_peers;
@@ -860,8 +864,14 @@ typedef struct iocomm_stats {
 int32_t iocomm_stats_snapshot(iocomm_runtime_t rt, iocomm_stats* out,
                               iocomm_error* err);
 
-/* 诊断 dump：返回 JSON 文本（顶层含 "version" 键，供格式演进），调用方用 iocomm_free_text 释放。
- * v1：连接表 + 队列水位（FR-5.5）。「最后 N 条错误」属 v1.1（FR-5.5b）。 */
+/* 诊断 dump：返回 JSON 文本，调用方用 iocomm_free_text 释放。
+ * v1 结构（FR-5.5；验收 AC-94）：
+ *   { "version": 1,
+ *     "connections": [ { "conn": <u64>, "peer_node_id": <u64>, "connected": <bool>,
+ *                        "send_queue_depth": <i64>, "recv_queue_depth": <i64> }, ... ],
+ *     "endpoints":   [ { "ep": <u64>, "name": <string>, "conn_count": <u32> }, ... ] }
+ * 键名与类型属**契约**；新增键只允许在顶层与对象内追加（读取方忽略未知键）。
+ * 「最后 N 条错误」属 v1.1（FR-5.5b）。 */
 int32_t iocomm_diagnostic_dump(iocomm_runtime_t rt, char** out_text,
                                uint64_t* out_len, iocomm_error* err);
 void    iocomm_free_text(char* text, uint64_t len);
@@ -890,6 +900,7 @@ void    iocomm_free_text(char* text, uint64_t len);
 | `iocomm_mon_record.captured_len` / `flags` 的 `TRUNCATED` / `SAMPLED_OUT` | **v1.1**（v1 恒 0） |
 | `SLOW` 事件（`slow_threshold_ms`） | **v1.1** |
 | `audit_fn` / `iocomm_audit_record` | **v1.1**（v1 走 `log_fn` 的 AUDIT 类别） |
+| `stats.audit_events` | **v1**——计「已写 `log_fn` 的 AUDIT 类别」的事件数；v1.1 起改为计「已送交 `audit_fn`」 |
 
 > 这张表是**版本归属的唯一权威**；各节里的〔v1.1〕标注若与它冲突，以本表为准。
 
@@ -897,7 +908,7 @@ void    iocomm_free_text(char* text, uint64_t len);
 
 ```c
 typedef enum iocomm_mon_kind {
-    ICOMM_MON_SENT      = 1,   /* **成功入队**后才产生；入队失败只产生 DROPPED */
+    ICOMM_MON_SENT      = 1,   /* **成功入队**后才产生（同步/异步同口径）；不等于已送达 */
     ICOMM_MON_RECEIVED  = 2,   /* 从传输收到（帧解码完成） */
     ICOMM_MON_DELIVERED = 3,   /* 已交付应用（推给回调 / 进入 recv 队列） */
     ICOMM_MON_DROPPED   = 4,   /* 被丢弃，原因见 drop_reason */
@@ -907,11 +918,11 @@ typedef enum iocomm_mon_kind {
 
 typedef enum iocomm_drop_reason {
     ICOMM_DROP_NONE          = 0,  /* 非 DROPPED 记录使用（`kind != DROPPED` 时 drop_reason 恒为 0） */
-    ICOMM_DROP_QUEUE_FULL    = 1,  /* 本端发送/接收队列满且策略为丢弃 */
+    ICOMM_DROP_QUEUE_FULL    = 1,  /* 本端接收队列满（策略为丢弃，或接收侧 ERROR） */
     ICOMM_DROP_NO_SUBSCRIBER = 2,  /* 端点扇出时无已建立连接 */
     ICOMM_DROP_TIMEOUT       = 3,  /* 异步发送排队超过 send_options.queue_timeout_ms */
     ICOMM_DROP_PEER_GONE     = 4,  /* 连接已断开时仍有待发消息 */
-    ICOMM_DROP_BACKPRESSURE  = 5,  /* 上游显式施加背压（策略为 ERROR 且队列满） */
+    ICOMM_DROP_BACKPRESSURE  = 5,  /* **发送侧**队列满且策略为 ERROR（消息未入队，被拒） */
     ICOMM_DROP_TOO_LARGE     = 6,  /* 帧超过 max_message_size（入站关闭连接） */
 } iocomm_drop_reason;
 ```
@@ -1049,6 +1060,21 @@ typedef struct iocomm_monitor_config {
 > 同步 `conn_send` / `endpoint_send` 返回 `TOO_LARGE`；异步经 `on_done(code=TOO_LARGE)`，**不入队**。
 > 接收侧超限：关闭该连接（`DISCONNECTED`）并产生一条 `DROPPED(reason=TOO_LARGE)` 记录。
 > **发送侧超限不产生 DROPPED**（消息从未入队，只返回错误码）。
+>
+> **入队前失败是否产生监控记录（唯一口径）**：
+>
+> | 入队前失败的原因 | `SENT` | `DROPPED` |
+> |---|---|---|
+> | **发送队列满且策略为 `ERROR`** | ❌ 不产生 | ✅ `DROPPED(BACKPRESSURE)` |
+> | `TOO_LARGE`（超过 `max_message_size`） | ❌ | ❌（编程错误，不是运行期事件） |
+> | 句柄无效 / 参数非法 / 未持有连接 | ❌ | ❌ |
+>
+> 理由：队列满**是运行期背压事件**，正是监控要回答的「命令为什么没发出去」；其余是调用方的编程错误，
+> 只走返回值 / `on_done`，不进监控环（否则误用会污染监控）。
+> **同步与异步在这一点上完全一致**——异步被拒同样不产生 `SENT`，同样产生 `BACKPRESSURE`。
+>
+> 已产生 `SENT` 的消息，其后续结局是 `DROPPED(TIMEOUT / PEER_GONE)`、`DELIVERED` 或取消——
+> **`SENT` 之后出现 `DROPPED` 是正常序列**（SENT = 已入队，不是「已送达」）。
 > 监控记录中 `original_len` 仍为实际长度。
 >
 > **参数校验**：`max_bytes` 非 0 时须 ≥ `sizeof(iocomm_mon_record)`；`sample_per_mille` / `capture_per_mille` > 1000、`ep` 与 `conn` 同时非 0、
