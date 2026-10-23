@@ -43,7 +43,7 @@
 | `0x02` | `HEARTBEAT` | 心跳（payload 见 §4） |
 | `0x03` | `HEARTBEAT_ACK` | 心跳确认 |
 | `0x0A` | `HELLO` | **连接上的第一帧**，携带线格式版本与节点身份（见 §5） |
-| `0x0B` | `HELLO_ACK` | 对 `HELLO` 的应答 |
+| `0x0B` | `HELLO_ACK` | **可选**应答（v1 不要求发送；收到时在握手前后都合法） |
 | `0x0C` | `ERROR` | **协议级错误**：发送后关闭连接（见 §2.1） |
 
 > `frame_type` **不进入 ABI**。它只在线格式里有意义；应用层永远看不到它。
@@ -57,7 +57,7 @@ payload 固定 6 B：`reason(u16)` + `reserved(u16)` + `detail(u32)`。
 | `0x0002` | `HANDSHAKE_TIMEOUT` | 握手超时（§5 规则 5） |
 | `0x0003` | `VERSION_UNSUPPORTED` | `wire_version` 不兼容 |
 | `0x0004` | `MALFORMED` | magic / 长度 / TLV 校验失败 |
-| `0x0005` | `PROTOCOL_STATE` | 未握手就收到 `DATA` 等 |
+| `0x0005` | `PROTOCOL_STATE` | 握手后收到重复 `HELLO` 等（**未握手收到 `DATA` 不发此帧**，见 §5 规则 3） |
 
 - `detail` 携带**附加信息**（如 `FRAME_TOO_LARGE` 时为实际帧长，`VERSION_UNSUPPORTED` 时为本端版本）。
 - 发送 `ERROR` 后**必须**关闭连接。
@@ -66,11 +66,13 @@ payload 固定 6 B：`reason(u16)` + `reserved(u16)` + `detail(u32)`。
 - **各 reason 的触发点**：
   | reason | 由谁发 | 同时产生的本地结果 |
   |---|---|---|
-  | `FRAME_TOO_LARGE` | 接收方：入站整帧 > `max_frame_bytes` | `DROPPED(TOO_LARGE)` + 计数 |
+  | `FRAME_TOO_LARGE` | 接收方：入站整帧 > `max_frame_bytes` —— **发 ERROR**（能读到完整 20 B 头就已知道超限，且对端懂 ERROR） | `DROPPED(TOO_LARGE)` + 计数 |
   | `HANDSHAKE_TIMEOUT` | 双方各自计时，先到者发 | 该连接在途 `on_done(DISCONNECTED)` |
   | `VERSION_UNSUPPORTED` | 收到不兼容 `HELLO` 的一方 | 同上 |
   | `MALFORMED` | 接收方：magic / 长度 / TLV 校验失败 | 同上 |
-  | `PROTOCOL_STATE` | 接收方：**握手后**再收到 `HELLO` / `HELLO_ACK`，或收到 `ERROR` 后再收到任何帧 | 同上 |
+  | `PROTOCOL_STATE` | 接收方：**握手后**再收到 `HELLO`（重复握手）；`HELLO_ACK` **不算**——它可随时到达，收到后忽略 | 同上 |
+- **收到 `ERROR` 之后**：本端进入「终止中」，**不再处理任何后续帧**（同批 TCP 读到的 `DATA` 直接忽略），
+  也不回发第二个 `ERROR`。连接按上一条关闭。
 - **接收方的观测面（唯一口径）**：收到 `ERROR` 属于**异步事件**，不挂在任何一次调用上。
   因此它固定映射为：
   1. 该连接上所有在途 `on_done` → `code = ICOMM_ERR_DISCONNECTED`（**不是** `CLOSED`；
@@ -163,6 +165,10 @@ payload 固定 6 B：`reason(u16)` + `reserved(u16)` + `detail(u32)`。
    （写成 `本端 ≤ 对端 ≤ 本端` 的三项链是错的：v2 对端 `(wire=2, min=1)` 与 v1 本端 `(wire=1, min=1)` 明明可互通，三项链会判 `1≤2≤1` 为假。）
 3. 双方都收到合法 `HELLO` 后，连接才进入「可发 DATA」状态；在此之前收到的 `DATA` 帧一律丢弃并**直接关闭**
    （不发 `ERROR`——此时对端可能根本不懂 `ERROR` 帧，发了也白发）。
+   **检查顺序（唯一口径）**：先做 `max_frame_bytes` 检查（只需读满 20 B 头），再判断帧类型。
+   因此**即使还没完成握手**，超限帧也回 `ERROR(FRAME_TOO_LARGE)`——长度超限与「懂不懂帧类型」无关。
+   **每条连接最多发一个 `ERROR` 帧**：一旦决定发送即进入「终止中」状态，后续任何帧都不再响应
+   （含第二个 `ERROR`），避免握手期多个 reason 竞争。
 4. `HELLO` / `HELLO_ACK` / `ERROR` **不携带 TLV 区**（`tlv_len = 0`）；带 TLV 的 `HELLO` 是格式错误，
    回 `ERROR(MALFORMED)` 后关闭（§3 规则 5 的必填 tag 要求对这三类帧**不适用**）。
 5. **握手超时**：连接建立后 **5000 ms**（v1 固定；不分出入站——入站侧没有 `connect_timeout_ms`
@@ -182,8 +188,10 @@ payload 固定 6 B：`reason(u16)` + `reserved(u16)` + `detail(u32)`。
 | `wire_version` 兼容（见 §5 规则 2） | 正常解析；额外 TLV tag 按 §3 规则 1 跳过 |
 | `wire_version` 不兼容 | `HELLO` 后关闭连接；**不做尽力兼容** |
 | 未收到 `HELLO` 就收到其他帧 | 关闭连接 |
-| `magic` 不匹配 / `version` 不在 {1} 内 | 帧损坏 → 关闭连接。**`reserved != 0` 不作为关闭条件**（前向兼容：读方忽略） |
-| `tlv_len` 或 `payload_len` 使整帧 > 本端 `max_frame_bytes` | **立即**判帧损坏 → 关连接（长度字段一读完就能判，不需要等数据） |
+| `magic` 不匹配 | 帧损坏 → 关闭连接 |
+| `version` 不在本端**可解析集合**内 | 帧损坏 → 关闭连接。本端可解析集合 = {1} ∪「握手协商结果表明对端版本」——**在 `HELLO` 之前只接受 {1}**；握手完成后按协商结果放宽（见 §6） |
+| `reserved != 0` | **不作为关闭条件**（前向兼容：读方忽略） |
+| `tlv_len` 或 `payload_len` 使整帧 > 本端 `max_frame_bytes` | **立即**判超限 → 回 `ERROR(FRAME_TOO_LARGE)` 后关连接（长度字段一读完就能判，不需要等数据）。这是**唯一**能在读完头部就判定的越界 |
 | 长度合法但数据未到齐 | **等待**：读满 `20 + tlv_len + payload_len` 字节（流式传输受连接读超时约束，超时 → 关连接） |
 
 > **不要在读到长度字段时就拿它和「当前缓冲区剩余字节」比**：TCP 是字节流，大帧必然跨段到达，
@@ -191,9 +199,13 @@ payload 固定 6 B：`reason(u16)` + `reserved(u16)` + `detail(u32)`。
 
 > 与 C ABI 的 `abi_major` 无关：**线格式版本与 ABI 版本是两套独立编号**。
 >
-> **两个 `version` 的分工**：帧头的 `version` 是**逐帧**的解析版本（v1 只有 `1`，其他值直接判帧损坏）；
-> `HELLO` 里的 `wire_version` / `min_version` 是**协商用**的区间。二者在 v1 必须都为 1；
-> 未来加新的帧头版本时，`HELLO` 的协商先于任何非 1 帧头的出现——即**帧头 version 的兼容性由 HELLO 协商结果决定**。
+> **两个 `version` 的分工**：
+> - `HELLO` 里的 `wire_version` / `min_version` 是**协商用**的区间，**永远是 v1 帧头（`version = 1`）承载**——
+>   协商值放在 payload 里，不放在帧头。
+> - 帧头的 `version` 是**逐帧解析版本**。**握手完成前只接受 `1`**；握手完成后，本端可解析集合按协商结果放宽。
+>
+> **因此 v2 的实现在握手的第一个 `HELLO` 上必须仍用 `version = 1` 的帧头**——否则 v1 对端在解析帧头时
+> 就判帧损坏并关闭，永远走不到协商。（帧头版本升级时，新版本必须先用旧帧头完成协商，这是唯一可行的做法。）
 > 理由：线格式约束的是「两个运行时怎么对话」，ABI 约束的是「宿主怎么调库」；同一 ABI 下可以跑不同线格式（例如将来 inproc 用内存直传），反之亦然。
 
 ---
@@ -277,10 +289,11 @@ payload 固定 6 B：`reason(u16)` + `reserved(u16)` + `detail(u32)`。
 | 路径 | 机制 | 依据 |
 |---|---|---|
 | **组播接收** | 所有 Runtime 加入同一组播组、绑同一端口，内核按**组播语义把数据报复制给每个 socket** | 组播天然是一对多 |
-| **单播接收**（`CAP_Q` / `CAP_A` / seed） | **每个 Runtime 用独立端口**：在 `47377..47476` 内取第一个可用端口绑定；向对端查询时，目标端口取对端 `BEACON` 里上报的**实际源端口** | 单播 UDP 在 `SO_REUSEADDR`/`SO_REUSEPORT` 下**不会**复制给所有 socket，会被同机另一个 Runtime 吞掉 |
+| **单播接收**（`CAP_Q` / `CAP_A` / seed） | **每个 Runtime 用独立端口**：在 **`47378..47477`**（100 个）内取第一个可用端口绑定（**不含组播端口 47377**）；向对端查询时，目标端口取对端 `BEACON` 里上报的**实际源端口**。**区间用尽** → `discovery_start` 返回 `RESOURCE_EXHAUSTED`（同机 >100 个 Runtime 需拆分主机，或关组播改 seed） | 单播 UDP 在 `SO_REUSEADDR`/`SO_REUSEPORT` 下**不会**复制给所有 socket，会被同机另一个 Runtime 吞掉 |
 
 - `BEACON` 的**源端口**因此必须被记录（`iocomm_node_info` 的地址里带端口）。
-- 接收方**忽略 `NODE_ID == 本机任一 Runtime` 的信标**，避免自我发现。
+- 接收方**忽略 `NODE_ID == 本 Runtime 的 node_id`** 的信标，避免自我发现（v1 每个 Runtime 独立 node_id，
+  只需忽略自己的；**不存在**「本机全部 Runtime」的集合，也不需要有）。
 - `SO_REUSEADDR` 只用于组播 socket；单播 socket **不**设该选项，靠端口区间分配保证互不冲突。
 
 **MTU 与分页**：
