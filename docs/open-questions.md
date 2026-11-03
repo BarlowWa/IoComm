@@ -1,5 +1,7 @@
 # IoComm 待核实问题清单（2026-10-20）
 
+> **⚠️ 最新批次见 [§8 2026-11-03 新一轮核实](#8-2026-11-03-新一轮核实)——15 条中 N-01 / N-02 / N-15 已按方案 A 处置，其余 12 条未处置。**
+>
 > **状态（2026-10-22 更新）**：审计来源的 **40 条已核实并处置**——C 37 条、R 3 条（D-08 / B-06 / B-12）。
 >
 > ⚠️ **本清单的覆盖边界**：审计只覆盖了 2026-10-20 时的 **6 份文档**；2026-10-21 新增的 `docs/api/wire-format.md`
@@ -154,3 +156,74 @@
 
 > **2026-10-22 补充**：M1 新增「跨进程名字表（§6.4）」产出，AC-11 由 M4 移到 M1，新增 AC-89；
 > 新建 `docs/api/wire-format.md`（D-06）；`MAX_BYTES` 默认值定死；平台矩阵删除 MinGW、ARM64 Windows 改为不在产品范围。
+
+---
+
+## 8. 2026-11-03 新一轮核实
+
+> **来源**：4 个独立只读 agent 对当前 `IoComm/` 全部 9 份文档的交叉核实（其中 1 个为 P0 断言的独立反方复核）。
+> 报告在 `.tmp_research/iocomm-verify-2026-11-03/`：`p0-claims.md`、`p0-independent-refutation.md`、
+> `protocol-gaps.md`、`identity-api-gaps.md`。每条均给逐字原文与当前行号。
+>
+> **判定口径**：本轮对每条先做「试图推翻」，推不翻才记为成立；下表「状态」一律为**未处置**，
+> 与 §1–§3 的 C / R 标记不混用。**行号对应 2026-11-03 版本，后续改动会漂移**。
+>
+> **覆盖教训**：N-03 / N-04 / N-06 / N-09 / N-12 / N-13 在 `iocomm-design-audit/` 与
+> `iocomm-session-audit/` 中**已被提出且标为重要/阻断**，但从未进入本清单，因此未被处置。
+> 前轮 `finding-accuracy.md` 的「17/18 已修复」只覆盖 `iocomm-dryrun/`，**与本批零重合**。
+
+### 8.1 阻断（M0/M2 冻结前必须裁决）
+
+| ID | 严重度 | 位置 | 问题摘要 | 建议处置 | 状态 |
+|---|---|---|---|---|---|
+| **N-01** | **B0** | `architecture.md:225`、`c-abi.md:677`、`:841` ↔ `c-abi.md:714-715`、`:719-721`；`requirements.md:276`（AC-30）、`:286`（AC-39） | **端点扇出集合自相矛盾**。前两处说扇出到「该端点全部已建立的连接」；§6.1 却说被持有的入站连接「按不归属端点处理……**它们不参与端点扇出**」。`ep_owner` 只存在于出站 `connect*` 签名，入站路径从不取该参数 ⇒ 扇出集合只剩 `ep_owner == ep` 的出站连接。**纯服务端（只 accept）调 `endpoint_send` 必返回 `NO_RECEIVER`**。AC-30 的 N 无定义，服务端扇出零 AC 覆盖。**引入点**：`d8156aa`（2026-10-22）为解决旧问题「入站连接归属未定义（session-audit 2.5）」新增了这句，但未回改 `:677` 与 `architecture.md:225` | **已按方案 A 处置（2026-11-03）**：入站连接归监听端点；扇出 = 全部成员连接 | **C（已处置 2026-11-03）** |
+| **N-02** | **B0** | `architecture.md:229`、`c-abi.md:526-534`、`:679-685`、`:920-926`、`:941-947`；`requirements.md:279`（AC-33）、`:323`（AC-75）；`ADR-002:30`、`:75` | **端点级 `iocomm_subscribe(ep)` / `endpoint_recv(ep)` 收不到入站消息**。持有动作是**封闭列表**（仅 `conn_retain` / `conn_subscribe`），端点级订阅不在其中；AC-33 也未给端点级订阅留豁免。更硬的一点：`c-abi.md:179` 把 `endpoint_accept` 与 `iocomm_subscribe` 同列在 `INVALID_STATE（recv 已启用）`，即 `endpoint_recv(ep)` 与 `endpoint_accept(ep)` **结构性互斥**，"用端点级拉取绕过 accept"这条路被 API 自身堵死。另：`iocomm_subscribe` / `endpoint_recv` 在 `requirements.md` 中**零 FR / AC** | 与 N-01 同根因，**一并裁决**。**已按方案 A 处置（2026-11-03）**：新增 FR-8.11 + 端点级持有规则 + AC-104 | **C（已处置 2026-11-03）** |
+| **N-03** | **B1** | `c-abi.md:525`；`wire-format.md:162`、`:166`；旧账：`iocomm-design-audit/cross-doc-consistency.md` XD-22 | **accept 回调的交付时点未定义**（TCP 建立时 vs 双向 HELLO 完成后）。`wire-format.md` 全文 `accept` **零命中**。后果：`accept` 回调内用 `CLOSE_AFTER` 发首条数据（README 主推写法）在"TCP 建立即交付"的实现下会被对端以「未握手 DATA」直接断链（`wire-format.md:166`）。inproc 不跑 HELLO，即便定为「HELLO 后交付」，其 `peer_node_id` 来源仍空白 | M2 前二选一并写进 §5.2：① 交付时点 = 双向 HELLO 完成（`peer_node_id` 必有值，且与借用语义相容）；② 交付时点 = TCP 建立（须显式规定握手完成前禁止发送 DATA、`peer_node_id` 允许 0）。推荐 ① | 未处置 |
+
+### 8.2 重要（实现前定）
+
+| ID | 严重度 | 位置 | 问题摘要 | 建议处置 | 状态 |
+|---|---|---|---|---|---|
+| **N-04** | B2 | `architecture.md:190`、`:195`；`c-abi.md:254` | **`node_id` 派生分支与 v1 语义互斥**：不可写时「从 machine-id / 主机名 / MAC 派生稳定哈希」是主机级纯函数，同机多进程必得**同一个** NodeId，直接违反「NodeId 唯一标识一个 Runtime 实例」。另 `state_dir` 注释写「可 NULL」，但自动模式只描述"在 state_dir 下读写"，**NULL 无分支**；docs 全文未规定 Windows 派生源（`MachineGuid` 未出现） | 定 `state_dir == NULL` 的策略（建议：视为不可写路径，但派生值必须掺入进程唯一量，或直接拒绝自动模式并要求显式 `node_id`）；把「只读文件系统」分支改为与 v1 语义相容的方案；补 Windows 派生源 | 未处置 |
+| **N-05** | B2 | `c-abi.md:575-581`、`:1030-1037`；`wire-format.md:258`；`architecture.md:340` | **`connect_node` 的地址解析规则不存在**。`connect_node` 只收 `node_id` + 端点名；`iocomm_endpoint_info.addr` 由 `ENDPOINTS` tag 原样上报，但**在 ABI 里没有任何消费者**。真正缺的是「`node_info` + 端点名 → 可拨号地址」的解析规则，以及「通配监听地址（`0.0.0.0:0` / `:0`）如何通告」的规则。（原判断「addr 被对端直接拿去 connect」不成立，已更正） | 补一节解析规则：成员查找 → 按 transport 选地址 → 通配地址用信标源 IP/端口替换 → 失败码；同时明确 `endpoint_info.addr` 的语义（通告值 vs 原始监听值） | 未处置 |
+| **N-06** | B2 | `requirements.md:91`（FR-4.4）、`:266`（AC-20）；`architecture.md:235`、`:249-253`、`:318`；`c-abi.md:1399-1400` | **重连语义零文字**：重连成功后 `iocomm_conn_t` 是否复用；队列中在途消息是否跨重连保留；`sequence` 是否按连接重计；`peer_node_id` / 订阅是否保持。AC-20 只验 `reconnects` 计数 | 至少定四件事：句柄复用（建议复用，否则应用无法持有稳定句柄）、在途消息（建议断开即清空并按 `PEER_GONE` 结算，重连不重放）、`sequence`（建议随连接重置并在重连后以新 `peer_node_id` 标识）、订阅保持（建议保持）。补 AC | 未处置 |
+| **N-07** | B2 | `architecture.md:264`、`:317`；`c-abi.md:331`、`:332`、`:402` | **`heartbeat_miss_limit` 默认值仍不可判定**：`:317` 写「N 可配，默认 ≥ 3」（下界），`:264` 的 `Healthy` 定义按「默认 3 个心跳周期」算，`:332` 只写「0 = 保持」。另 `c-abi.md:331` 的「默认 2000 ms（见架构 §6.2）」是**悬空引用**——`architecture.md:312-318` 全文没有 2000（该值由 `efb22bf` 改入，架构侧未同步） | 把 `heartbeat_ms = 2000`、`heartbeat_miss_limit = 3` 写成具体默认值并落到架构 §6.2；删除或修正悬空引用 | 未处置 |
+| **N-08** | B3 | `c-abi.md:352-356`、`:168`；`architecture.md:93`、`:128`、`:384` | **`iocomm_runtime_run_for` 语义未定义**：无注释、无需求来源（`requirements.md` 零命中）、错误矩阵无 `TIMEOUT`；`duration_ms = 0` 与返回值语义完全无定义；与 `run_once` 的关系（是否等于循环）未写 | 补注释：`run_for(duration_ms)` = 循环 `run_once` 直到累计耗时达 `duration_ms`；`0` 的语义（建议 = 不等待）；返回码与 `run_once` 同口径。补一条需求来源 | 未处置 |
+| **N-12** | B2 | `c-abi.md:408-427`、`:323-341`；`architecture.md:315` | **端点级套接字参数缺失**：`TCP_NODELAY`、监听 backlog、keepalive 开关在 `endpoint_config` / `tune_config` 中均无字段（docs + README 对 `TCP_NODELAY`、`backlog` 零命中）。对「小消息、低延迟」的工业 IO，Nagle 可能引入数十毫秒；backlog 溢出表现为连接被拒且计数不可见 | 至少在 `endpoint_config` / `tune_config` 尾部追加 `tcp_nodelay`（建议默认开）与 `listen_backlog`；若定为不可配置，须写进非目标并说明替代方案 | 未处置 |
+| **N-13** | B3 | `requirements.md:46`（FR-2.6）、`:285`（AC-38）；`architecture.md:80`、`:334`、`:346-352` | **本机注册表（`publish_local`）缺实现机制**：FR-2.6/AC-38 要求发布并产生 `JOINED/LEFT`，架构只有「local-registry / 本机注册表」一行；对比 §6.4 跨进程名字表给了具体机制。§6.4 的名字锁只能回答「名字是否被占」，承载不了端点能力与事件；也未规定 `discovery_start` 是否为前置条件 | 明确机制（建议：Runtime 内共享内存/命名对象 + 段内链表，或复用 §6.4 名字锁并附加能力段），并规定未 `discovery_start` 时 `publish_local` 的行为（拒绝 or 延迟发布） | 未处置 |
+
+### 8.3 次要（可后补，但不能丢）
+
+| ID | 严重度 | 位置 | 问题摘要 | 建议处置 | 状态 |
+|---|---|---|---|---|---|
+| **N-09** | B4 | `c-abi.md:476`、`:175`、`:203-205`、`:356`；`requirements.md:343`（AC-95） | **无 `err` 参数的函数与错误通道契约冲突**（2026-11-03 扫描确认**三个**，不是两个）：`iocomm_endpoint_count`、`iocomm_runtime_wakeup`、`iocomm_discovery_snapshot_release` 的声明均无 `iocomm_error*`，但矩阵 `:175`/`:173` 给前两者列了 `STALE_HANDLE/INTERNAL`；AC-95 的「无错误通道」豁免清单（6 个函数）三者均不含 | 三选一并统一：① 给三者加 `err`；② 把它们补进 AC-95 豁免，矩阵行改为「无错误通道」；③ 保留返回值承载（如 `snapshot_release` 的 `STALE_HANDLE`）。**三者必须同一口径**，否则同一份头文件里有三套失败报告方式 | 未处置 |
+| **N-10** | B4 | `c-abi.md:860-865` | **`op_id` 的唯一性范围未定义**：`send_cancel` 只拿 `op_id`，但没写它是每 Runtime / 每连接 / 每组唯一，也未写是否回绕复用（对比 `capture_id` 明文「永不复用」、`seq` 明文警告回绕） | 定为「每 Runtime 单调分配、不回绕（耗尽返回 `RESOURCE_EXHAUSTED`）」，并写明 `send_cancel` 对已完成 / 不存在 op 的返回 | 未处置 |
+| **N-11** | B4 | `c-abi.md:913`；`wire-format.md:104`；`architecture.md:372`；`platform-support.md:222` | **`clock_synced` 永不置位**：三处只声明字段/tag，全文无时间同步机制、无置位规则（PTP 仅在平台支持「待核实」清单）。实质是恒 0 字段 | 二选一：删除该字段与 `CLOCK_SYNCED` tag（载荷不透明、库不提供时间同步）；或保留并在注释中写明「v1 恒 0，保留给 v2 时间同步扩展」 | 未处置 |
+| **N-14** | B4 | `c-abi.md:414`、`:508`；`requirements.md:74` | **`listen_addr` / `listen_transport` 组合语义不完整**：只写了「`listen_addr` NULL = 不监听」，未规定 transport 非空而 addr 为 NULL、addr 非空而 transport 为 NULL、两者皆空的行为（「inproc 的 `listen_addr` 必填」已规定，不在此列） | 补一张组合表，每格给 `INVALID_ARGUMENT` / 不监听 / `NOT_SUPPORTED` 之一 | 未处置 |
+
+> **N-15（并入 N-01，已随方案 A 处置）**：入站消息进「端点接收队列」还是「连接接收队列」——已在 `c-abi.md` §6.4 定稿：
+> 默认进**端点接收队列**；被 `conn_subscribe` / `conn_retain` 单独接管的连接改进入该连接队列，不双投。
+
+### 8.4 N-01 / N-02 的裁决方案
+
+> **裁决结果（2026-11-03）：采用方案 A**，已落到 `requirements.md`（FR-8.6 / 8.8 / 8.11、AC-30 / 33 / 39 / 75 / 103 / 104）、
+> `c-abi.md`（§5.2 / §6.1 / §6.3 / §6.4）、`architecture.md`（§5.2 + M2 里程碑）、`ADR-002`（决策 3 修订注）、`README.md`。
+> 下表三方案保留作决策记录；**下面「裁决后必须同步的位置」除 AC-32 外已全部执行**——AC-32 未改动，
+> 因为端点级订阅成立后 `endpoint_recv(ep)` 与 `endpoint_accept(ep)` 的互斥由既有 §6.4 规则继续覆盖，无需改写。
+
+| 方案 | 内容 | 优点 | 代价 |
+|---|---|---|---|
+| **A（推荐）入站连接归监听端点** | 删除「入站连接不参与端点扇出」，改为「入站连接归属于监听它的端点」；`endpoint_send` 目标 = 端点全部已建立连接（入站 + `ep_owner == ep` 出站）；入站连接的 `conn_send` 用端点共享发送队列；`endpoint_recv` / `iocomm_subscribe` 随之成立 | 服务端扇出可用；与 `architecture.md:225`、`c-abi.md:677/920` 一致；FR-6.8 / AC-30 / AC-32 不需重写；符合「端点 = 监听者」直觉；与 `endpoint_destroy` 第 2 条（入站连接随端点 FIN）自然衔接 | 入站 peer 与出站连接共享端点队列（§6.1「代价一」已覆盖）；须新增端点级订阅的 FR + AC（当前零覆盖）；AC-30 的 N 需定义为「入站 + 归属出站」 |
+| B 维持「不归属」，扇出只到出站 | 保留 §6.1 现有队列模型；把 `c-abi.md:677`、`:841`、`architecture.md:225` 改成「所有归属该端点的出站连接」；服务端扇出改为 `conn_count(ep)` + 逐条 `conn_send`。端点级 `recv/subscribe` 必须删除，或另定为「未注册 accept 时由库自动接受并持有」 | 不动已有队列决策；实现最简单 | 与「端点 = 监听者」直觉相反；服务端无法用一条 API 广播；FR-6.8 / AC-32 需重写或删除；`architecture.md:225` / `c-abi.md:920` 须改；并存两套所有权规则 |
+| C 分离「队列归属」与「扇出成员资格」 | 入站连接不占端点队列，但计入端点扇出 | 看似最小改动 | **不自洽**：共享队列模型下 `endpoint_send` 必须把项放进端点队列，成员不在该队列就无法扇出；若改为放进各自队列，则「共享队列 + 队列项带目标连接」模型失效。**不推荐** |
+
+> **裁决后必须同步的位置**（按方案 A）：`c-abi.md` §5.2 发送目标表、§6.1 队列归属规则、§6.3 `iocomm_subscribe` / `endpoint_recv` 注释；
+> `architecture.md` §5.2 对象模型表与借用语义段；`requirements.md` AC-30（N 定义）、AC-33、AC-39（过滤口径）、AC-32（端点级互斥）；
+> 新增端点级订阅的 FR + AC；`README.md` 第 3 步注释。
+
+### 8.5 建议处置顺序
+
+1. **N-01 / N-02 / N-15**（同根因，阻断）——先定 §8.4 的方案 A/B，再一次性改五处文档与三条 AC。
+2. **N-03**（M2 线格式冻结前）——决定 README 主推示例是否可用。
+3. **N-04 / N-05 / N-06 / N-07 / N-12**（M3/M4 前）。
+4. **N-08 / N-09 / N-10 / N-11 / N-13 / N-14**（可随对应文档批次顺带修）。

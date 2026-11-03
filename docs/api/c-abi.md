@@ -176,7 +176,7 @@ const char* iocomm_strerror(int32_t code);  /* 静态存储期，不要 free */
 | `iocomm_endpoint_name_state` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INTERNAL`（错误码仍走 `err`，返回值恒为 0） |
 | `iocomm_endpoint_local_addr` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`RESOURCE_EXHAUSTED`、`INTERNAL` |
 | `iocomm_endpoint_set_overflow` | `STALE_HANDLE`、`INVALID_ARGUMENT`（枚举非法）、`INTERNAL` |
-| `iocomm_endpoint_accept` / `iocomm_subscribe` / `iocomm_conn_subscribe` / `iocomm_conn_condition_subscribe` / `iocomm_endpoint_condition_subscribe` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`（`recv` 已启用）、`RESOURCE_EXHAUSTED`、`INTERNAL` |
+| `iocomm_endpoint_accept` / `iocomm_subscribe` / `iocomm_conn_subscribe` / `iocomm_conn_condition_subscribe` / `iocomm_endpoint_condition_subscribe` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`（`recv` 已启用；`conn_subscribe` 另有「该连接已由端点级订阅/拉取持有」，见 §5.2）、`RESOURCE_EXHAUSTED`、`INTERNAL` |
 | `iocomm_unsubscribe` / `iocomm_conn_close_graceful` / `iocomm_conn_retain` | `STALE_HANDLE`、`INVALID_STATE`、`WOULD_DEADLOCK`（loop 线程；`unsubscribe` 本订阅回调内除外）、`TIMEOUT`、`INTERNAL` |
 | `iocomm_connect` / `iocomm_connect_node` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`NOT_SUPPORTED`、`TIMEOUT`、`DISCONNECTED`、`NO_RECEIVER`、`WOULD_DEADLOCK`、`RESOURCE_EXHAUSTED`、`INTERNAL` |
 | `iocomm_connect_async` / `iocomm_connect_node_async` | 同步返回：`STALE_HANDLE`、`INVALID_ARGUMENT`、`NOT_SUPPORTED`、`WOULD_DEADLOCK`、`RESOURCE_EXHAUSTED`、`INTERNAL`；其余结果走 `on_done` |
@@ -440,7 +440,7 @@ int32_t iocomm_endpoint_create(iocomm_runtime_t rt,
 /* 销毁本地端点。语义完整定义如下（此前为空缺）：
  *  1. **名字锁**：立即释放跨进程名字锁（§architecture 6.4），其他进程可马上注册同名端点；
  *     本 Runtime 内同名端点也可立即重建。
- *  2. **入站连接**：全部以 FIN 优雅关闭（不是 RST）；这些连接上的订阅失效，
+ *  2. **入站连接**（本端点的**成员连接**）：全部以 FIN 优雅关闭（不是 RST）；这些连接上的订阅失效，
  *     **接收队列**中未取走的消息直接丢弃（**不产生 `DROPPED` 记录**——它们在入站时已记过
  *     `RECEIVED`，且销毁端点不是「丢弃事件」）。正在执行的 `accept` 回调会先跑完，之后不再触发。
  *  3. **出站连接**（`ep_owner == ep` 的连接）：**转为独立队列后继续存活**。销毁时把它们的未发项
@@ -459,8 +459,8 @@ int32_t iocomm_endpoint_create(iocomm_runtime_t rt,
  *  5. **阻塞中的同步发送**（`BLOCK` 策略，§6.1）：被唤醒并返回 `ICOMM_ERR_CLOSED`。
  *  6. **订阅 / 监控者**：挂在**本端点**上的订阅与监控者一并回收（等同 unsubscribe / monitor_close，
  *     但**不产生**审计事件）。连接到它们的回调不再触发。
- *  7. **发送队列**：**未被第 3 条迁移的**剩余消息（即属于入站连接或已无法投递的项）丢弃，
- *     逐条产生 `DROPPED(PEER_GONE)`（若有监控者）。出站连接的消息已随第 3 条迁移，**不在此列**。
+ *  7. **发送队列**：**未被第 3 条迁移的**剩余消息（即属于**入站成员连接**或已无法投递的项）丢弃，
+ *     逐条产生 `DROPPED(PEER_GONE)`（若有监控者）。出站成员连接的消息已随第 3 条迁移，**不在此列**。
  *  8. 函数返回后句柄立即失效；重复调用返回 `STALE_HANDLE`。
  *  **不阻塞**；线程要求与 `conn_destroy` 相同——任意线程可调用，但同一对象的创建/销毁
  *  由调用方串行化（架构 §3.3）。 */
@@ -531,7 +531,13 @@ int32_t iocomm_endpoint_local_addr(iocomm_runtime_t rt, iocomm_endpoint_t ep,
  *   - iocomm_conn_send_async  → **仅在 send_options.flags 含 ICOMM_SEND_CLOSE_AFTER 时合法**：
  *                               数据 flush 后优雅关闭，on_done 之后句柄失效；
  *                               未设 CLOSE_AFTER 且未 subscribe/retain → ICOMM_ERR_INVALID_STATE
+ *                               （**例外**：本端点已启用端点级订阅/拉取时连接已被持有，不返回该错误）
  *   - iocomm_conn_destroy     → 立即关闭（= 显式拒绝），重复调用返回 STALE_HANDLE
+ *
+ * **端点级持有**（2026-11-03，N-02）：该端点上已启用 `iocomm_subscribe(ep)` 或
+ * `endpoint_recv(ep)` 时，入站连接在交付前即由**端点隐式持有**，回调内无需再调任何持有动作；
+ * 此时回调仍会触发（用于观测新连接），但回调内对该连接调 `conn_subscribe` 返回
+ * `INVALID_STATE`（已由端点持有），`conn_retain` 幂等返回 `OK`。
  *
  * 「什么都不做」与「保存句柄」都会导致回调返回后回收——库无法观测外部变量。
  * 同步 iocomm_conn_send 在回调内会返回 WOULD_DEADLOCK，需在别的线程调用。 */
@@ -553,7 +559,8 @@ int32_t iocomm_endpoint_accept(iocomm_runtime_t rt, iocomm_endpoint_t ep,
 
 /* 出站连接（同步）：阻塞调用者线程；loop 线程上返回 WOULD_DEADLOCK。
  * ep_owner 指定该连接归属哪个本地端点（用于 endpoint_send 扇出与
- * iocomm_conn_count 过滤）；传 0 表示不属于任何端点（只能点对点使用）。 */
+ * iocomm_conn_count 过滤）；传 0 表示不属于任何端点（只能点对点使用）。
+ * **入站连接不需要（也无法）指定 ep_owner**：被持有后自动归属监听它的端点，见 §5.2 成员资格。 */
 int32_t iocomm_connect(iocomm_runtime_t rt, iocomm_endpoint_t ep_owner,
                        const char* transport, uint64_t transport_len,
                        const char* addr, uint64_t addr_len,
@@ -590,7 +597,8 @@ int32_t iocomm_connect_node_async(iocomm_runtime_t rt,
                                   void* user, iocomm_error* err);
 
 /* 接管一条连接但**不安排任何收发**（拉取模式）。
- * 这是**唯一**的显式持有动作（subscribe 是推送侧的等价持有）：
+ * 这是**单条连接层面**唯一的显式持有动作（subscribe 是推送侧的等价持有；
+ * 端点级 `iocomm_subscribe(ep)` / `endpoint_recv(ep)` 是无须逐连接调用的等价持有，见 §5.2）：
  * 在 accept 回调内调用后，该连接不再被自动回收，调用方可在其他线程
  * 对它调用 iocomm_conn_recv。**幂等**：对同一连接重复调用返回 ICOMM_OK，
  * 连接只有一个「C 侧所有权」。持有不与订阅冲突——但订阅与 recv 的
@@ -674,15 +682,21 @@ int32_t  iocomm_conn_get  (iocomm_runtime_t rt, iocomm_endpoint_t ep,
 | 目标 | 语义 |
 |---|---|
 | `iocomm_conn_t` | **点对点**，发给这一条连接 |
-| `iocomm_endpoint_t`（本地监听端点） | **扇出**：发给该端点当前所有已建立的连接；没有连接时返回 `NO_RECEIVER` |
+| `iocomm_endpoint_t`（本地监听端点） | **扇出**：发给该端点的全部**成员连接**（它的全部入站连接 + `ep_owner == ep` 的出站连接）；没有成员连接时返回 `NO_RECEIVER` |
 
 > **入站连接的所有权：借用语义**（完整理由见 [ADR-002](../adr/ADR-002-message-addressing-and-ownership.md)）。
 > `accept` 回调拿到的 `inbound` **只在回调期间有效**；回调返回时若库没有观测到任何持有动作，
-> 连接被自动收回并以 FIN 优雅关闭。持有动作只有两种：**显式 `conn_retain`** 与 **隐式
-> `conn_subscribe`**。`conn_send_async` 不是所有权开关——「发一条拒绝就走」用
+> 连接被自动收回并以 FIN 优雅关闭。持有动作有**三种**：**显式 `conn_retain`**、**隐式
+> `conn_subscribe`**、以及**端点级持有**——该监听端点已注册 `iocomm_subscribe(ep)` 或
+> `endpoint_recv(ep)` 时，它接入的入站连接在 accept 时即由端点隐式持有（见 §6.4）。
+> `conn_send_async` 不是所有权开关——「发一条拒绝就走」用
 > `send_options.flags = ICOMM_SEND_CLOSE_AFTER` 表达；不带 `CLOSE_AFTER` 的 `send_async`
 > 若同时未持有，返回 `INVALID_STATE`，强制在回调内表态。
 > **仅保存句柄不算持有**（库无法观测外部变量），该连接会被回收并返回 `STALE_HANDLE`。
+>
+> **成员资格**：入站连接被持有后即成为该监听端点的**成员**，参与 `endpoint_send` 扇出与
+> `conn_count(ep)`；语义与 `ep_owner == ep` 的出站成员连接相同。（2026-11-03 修正 N-01：
+> 此前「入站连接不归属端点、不参与扇出」的规定已废止——它使纯服务端无法广播。）
 
 > **manual 模式的建连路径**：`iocomm_connect_async` / `iocomm_connect_node_async`。同步版本在 loop 驱动线程上一律返回 `WOULD_DEADLOCK`。
 > **`endpoint` 与 `conn` 是两个独立句柄空间**，不能互相替代。
@@ -712,14 +726,18 @@ int32_t  iocomm_conn_get  (iocomm_runtime_t rt, iocomm_endpoint_t ep,
 ```c
 /*
  * **队列归属规则（唯一口径）**：
- *   - 归属端点的连接（`ep_owner == ep`）共用该端点的**一条发送队列**——这是 FR-4.6 的有界资源，
+ *   - **成员连接**（`ep_owner == ep` 的出站连接，以及被监听端点持有的入站连接——见 §5.2）
+ *     共用该端点的**一条发送队列**——这是 FR-4.6 的有界资源，
  *     容量 `send_queue_max` **条**，且字节总量 ≤ **64 MiB**（§6.0）——**发送队列**的占用上界与连接数无关；
  *     接收方向则是「端点一条 + 每连接各一条」，总数随连接数增长（上界 = `(1 + N) × recv_queue_max`）；
  *   - **每个队列项都携带目标连接句柄**（`conn_send` 填该连接；`endpoint_send` 扇出时为 N 个独立项）；
  *   - **入站连接**：在 `accept` 回调内即确定为「拒绝」还是「持有」——拒绝时**不分配**发送队列；
- *     持有（`conn_retain` / `conn_subscribe` / `CLOSE_AFTER`）时按「不归属端点」处理，
- *     各自一条队列、容量取 runtime 默认（它们不参与端点扇出）；
- *   - 不归属任何端点的连接（`ep_owner == 0`）各自有一条队列，容量取 runtime 默认；
+ *     持有后（`conn_retain` / `conn_subscribe` / 端点级订阅）即成为**监听端点的成员**，
+ *     与 `ep_owner == ep` 的出站连接**共用该端点的发送队列**，参与 `endpoint_send` 扇出与 `conn_count(ep)`。
+ *     **`CLOSE_AFTER` 不是持有动作**（FR-8.8「发送不是所有权开关」）：它只把连接保持到数据 flush
+ *     完毕并立即关闭，因此**不产生成员资格**、不参与扇出、不分配发送队列。
+ *     > 2026-11-03 修正 N-01：此前「按不归属端点处理、各自一条队列、不参与扇出」的规定已废止——它使纯服务端无法广播。
+ *   - 不归属任何端点的连接（`ep_owner == 0` 的出站连接）各自有一条队列，容量取 runtime 默认；
  *   - 接收方向：端点一条接收队列，连接一条接收队列（同样带归属）；
  *   - 溢出策略按端点取一个值，作用于该端点队列及其连接队列（ADR-002）。
  *
@@ -917,7 +935,14 @@ typedef struct iocomm_message {
 #define ICOMM_MESSAGE_INIT { sizeof(iocomm_message), 0, {NULL,0}, \
                              0, 0, 0, 0, 0, 0, {0} }
 
-/* 订阅推送。ep 是**本地监听端点**，接收其所有入站连接的消息。 */
+/* 订阅推送。ep 是**本地监听端点**，接收其**全部入站成员连接**的消息。
+ * **端点级持有（唯一口径，2026-11-03 N-02）**：在该端点启用本订阅（或 `endpoint_recv(ep)`）后，
+ * 该端点接入的入站连接在 accept 时即由端点隐式持有，**不再需要（也不会）在 accept 回调内
+ * 调 `conn_retain` / `conn_subscribe`**；`accept` 回调本身仍会触发，仅用于观测新连接。
+ * 未注册 `endpoint_accept` 时，入站连接同样由本订阅隐式持有并正常投递——
+ * 这是「只读端点、不关心单条连接」的服务端主用法。
+ * 与 `conn_subscribe` 的关系：端点级订阅对**此后接入**的成员连接生效；
+ * 已存在的入站连接需按 §6.4 的端点/连接互斥规则另行判定。 */
 typedef void (*iocomm_message_fn)(void* user, iocomm_endpoint_t ep,
                                   const iocomm_message* msg);
 
@@ -938,7 +963,9 @@ int32_t iocomm_conn_subscribe(iocomm_runtime_t rt, iocomm_conn_t conn,
 int32_t iocomm_unsubscribe(iocomm_runtime_t rt, iocomm_subscription_t sub,
                            uint64_t timeout_ms, iocomm_error* err);
 
-/* 拉取式接收（与 subscribe 二选一，见 §6.4）。 */
+/* 拉取式接收（与 subscribe 二选一，见 §6.4）。
+ * 端点级 recv 的隐式持有规则与 `iocomm_subscribe(ep)` 相同（见上）：
+ * 启用后，该端点的入站连接在 accept 时即由端点持有，消息进入**端点接收队列**。 */
 int32_t iocomm_endpoint_recv(iocomm_runtime_t rt, iocomm_endpoint_t ep,
                              iocomm_message* out, uint64_t timeout_ms,
                              iocomm_error* err);
@@ -959,6 +986,11 @@ void iocomm_message_release(iocomm_message* msg);
 | 先 `subscribe` 再 `recv` | `recv` 返回 `ICOMM_ERR_INVALID_STATE` |
 | 先 `recv` 再 `subscribe` | `subscribe` 返回 `ICOMM_ERR_INVALID_STATE` |
 | 两者都未设置 | 消息进入**端点/连接的接收队列**，直到队列满后按溢出策略处理 |
+
+> **端点级与连接级是两套独立的接收对象**（2026-11-03 N-15）：
+> 入站成员连接的消息默认进入**端点接收队列**（这是 `endpoint_recv` / `iocomm_subscribe(ep)` 的来源）；
+> 只有通过 `conn_subscribe` / `conn_retain` **单独接管**的连接，其消息才改进入**该连接的接收队列**
+> （由 `conn_recv` 消费），且该连接不再参与端点级投递。二者互斥，不会双投。
 
 > 这条规则消除了「谁消费、是否双投、背压如何合并」的歧义。若确实需要两种消费方式，请使用**两个不同的端点/连接**。
 

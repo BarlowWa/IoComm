@@ -130,11 +130,12 @@
 | FR-8.3 | 连接是双向的：出站连接也能接收对端数据 | P0 |
 | FR-8.4 | 发现阶段二上报**端点能力**（对端注册了哪些端点） | P0 |
 | FR-8.5 | **入站连接必须可被应用拿到**：`endpoint_accept` 回调交付连接句柄（**借用**：仅在回调期间有效） | P0 |
-| FR-8.6 | 发送目标语义明确：连接 = 点对点；端点 = 扇出 | P0 |
+| FR-8.6 | 发送目标语义明确：连接 = 点对点；端点 = **扇出到该端点的全部成员连接（入站 + `ep_owner == ep` 出站）** | P0 |
 | FR-8.7 | 收到消息时可从 `from` 取得来源连接，用于**回发** | P0 |
-| FR-8.8 | **入站连接的持有**：显式 `conn_retain` 或隐式 `conn_subscribe` 即持有；都不做则回调返回时自动关闭（优雅 FIN）。**发送不是所有权开关**：「发完即关」用 `ICOMM_SEND_CLOSE_AFTER`（ADR-002） | P0 |
+| FR-8.8 | **入站连接的持有**：显式 `conn_retain`、隐式 `conn_subscribe`、**端点级持有**（端点已启用 `iocomm_subscribe(ep)` / `endpoint_recv(ep)`）三者之一即持有；都不做则回调返回时自动关闭（优雅 FIN）。**发送不是所有权开关**：「发完即关」用 `ICOMM_SEND_CLOSE_AFTER`（ADR-002） | P0 |
 | FR-8.10 | **端点销毁时的出站连接**：`ep_owner == ep` 的出站连接**继续存活**，未发项原子迁移到各自的连接队列（容量取 runtime 默认），不再计入该端点扇出 | P0 |
 | FR-8.9 | **连接的四种关闭**：`conn_destroy`（立即取消在途发送、丢弃缓冲、FIN，各回调一次 `CANCELLED`）/ `conn_close_graceful(linger_ms)`（flush 后关）/ `ICOMM_SEND_CLOSE_AFTER`（发完即关）/ `conn_abort`（RST 异常中止） | P0 |
+| FR-8.11 | **端点级接收（2026-11-03 新增）**：`iocomm_subscribe(ep)` / `iocomm_endpoint_recv(ep)` 一经启用，即**隐式持有**该端点此后的全部入站连接（accept 回调仍会触发，仅用于观测）；不注册 `endpoint_accept` 时同样可正常接收。入站消息默认进入**端点接收队列**；被 `conn_subscribe` / `conn_retain` 单独接管的连接改进入该连接的接收队列，不再参与端点级投递（不双投） | P0 |
 
 ### FR-9 节点身份
 
@@ -273,17 +274,17 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | **AC-27** | 建连失败 / 超时 / 销毁 Runtime 三种情况下，`connect_async` 的 `on_done` 均恰好触发一次（销毁时为 `CANCELLED`），且失败路径无 fd/句柄残留 | 通过 | FR-8.1 |
 | **AC-28** | 同一参数在 runtime/endpoint/tune 三处设置时，按 [C ABI §5.0](api/c-abi.md#50-配置优先级唯一的权威定义) 优先级生效 | 通过 | FR-5.6 |
 | **AC-29** | 服务端在 `endpoint_accept` 回调内 `conn_retain`，另一线程用 `conn_send` 回发；客户端能收到（回调内不得用同步 `conn_send`，会返回 `WOULD_DEADLOCK`） | 通过 | FR-8.5 / FR-8.7 / FR-8.8 |
-| **AC-30** | `endpoint_send` 扇出到 N 条连接，`out_delivered == N`；无连接时返回 `NO_RECEIVER` | 通过 | FR-8.6 |
+| **AC-30** | `endpoint_send` 扇出到 **N = 该端点的全部成员连接**（入站成员 + `ep_owner == ep` 的出站连接），`out_delivered == N`；无成员连接时返回 `NO_RECEIVER` | 通过 | FR-8.6 |
 | **AC-31** | 出站连接上 `conn_subscribe` 能收到对端数据（双向） | 通过 | FR-8.3 |
 | **AC-32** | 同一接收对象上 `subscribe` 与 `recv` 同时使用，第二个调用返回 `INVALID_STATE` | 通过 | FR-6.8（实现依据 [C ABI §6.4](api/c-abi.md#64-拉取与推送的互斥规则)） |
-| **AC-33** | `accept` 回调返回时既未 `conn_retain` 也未 `conn_subscribe` 的连接被自动收回（连接数回到 0，对端观测到优雅 FIN 而非 RST） | 通过 | FR-8.5 / FR-8.8 |
+| **AC-33** | `accept` 回调返回时既未 `conn_retain` 也未 `conn_subscribe`、**且该端点未启用端点级订阅/拉取**的连接被自动收回（连接数回到 0，对端观测到优雅 FIN 而非 RST） | 通过 | FR-8.5 / FR-8.8 |
 | **AC-33b** | 回调内显式 `conn_destroy` 拒绝同样以 FIN 关闭；`conn_abort` 才产生 RST | 通过 | FR-8.8 / FR-8.9 |
 | **AC-34** | `endpoint_create` 返回非 0 句柄，且 `endpoint_name_state` 为 `HELD_BY_SELF`；按名字查询 / 枚举端点返回正确结果；不存在时返回 `NOT_FOUND` | 通过 | FR-1.1 / FR-1.3 |
 | **AC-35** | 三项静态检查全过：① 所有句柄最终 typedef 为 `uint64_t`（经 `iocomm_handle_t` 间接亦算），声明中无 `void*` 句柄；② **声明部分**（结构体字段 + 函数参数 + 返回值，排除注释）无 `long` / `size_t` / `bool`；③ **cdylib** 的公开 API 符号均为 `iocomm_*`（Linux `nm -D`，Windows `dumpbin /exports`；M0 先取实际清单，必要时给白名单）；staticlib 不做此检查 | 通过 | FR-7.1 / FR-7.4 / FR-7.6 |
 | **AC-36** | 把 `conn` 句柄传给 `endpoint_*` 函数返回 `STALE_HANDLE`（不误用） | 通过 | FR-1.6 |
 | **AC-37** | `log_fn != NULL` 时，`runtime_start` 后环境指纹**恰好输出一次**（P1） | 通过 | FR-5.7 |
 | **AC-38** | `publish_local=1` 的端点出现在 discovery 快照（本机注册表条目并入同一节点表）中，并产生 `JOINED/LEFT` 事件（P1） | 通过 | FR-2.6 |
-| **AC-39** | `connect_async(ep_owner=ep)` 建立的出站连接计入 `endpoint_send` 扇出与 `conn_count(ep)`；`ep_owner=0` 时两者均不计入 | 通过 | FR-8.6 |
+| **AC-39** | `connect_async(ep_owner=ep)` 建立的出站连接计入 `endpoint_send` 扇出与 `conn_count(ep)`；`ep_owner=0` 时两者均不计入。**入站成员连接同样计入两者**（N-01 修正） | 通过 | FR-8.6 |
 | **AC-40** | 在 accept 回调内 `conn_retain` 后，另一线程可对该入站连接 `conn_recv` 收到数据 | 通过 | FR-8.5 / FR-6.2 / FR-6.3 |
 | **AC-41** | 环**有空位**时分别诱发：**接收**队列满（`QUEUE_FULL`）、扇出无连接（`NO_SUBSCRIBER`）、异步发送超时（`TIMEOUT`）、对端已断开时发送（`PEER_GONE`）、**发送**队列满且策略 `ERROR`（`BACKPRESSURE`，同步与异步各一次）；各产生一条 `DROPPED` 且 `drop_reason` 正确 | 通过 | FR-10.3 |
 | **AC-42** | 同一构建、同一发送脚本（≥1e6 条、固定 256 B），monitor **关闭** vs **开启但不 poll** 各 5 轮，msgs/s 中位数差值 &lt; 1% | 通过 | FR-10.5 |
@@ -320,7 +321,7 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | **AC-72** | 记录离开 `retain_window` 后，其占用的 `max_bytes` 被回收（持续捕获不会因总量口径而提前耗尽） | 通过 | FR-10.4 / 9.3 |
 | **AC-73** | **整帧**（`20 + tlv_len + payload_len`）超过 `max_message_size`：同步发送返回 `TOO_LARGE`；异步经 `on_done(TOO_LARGE)` 且不入队；入站超大帧关闭连接并产生 `DROPPED(reason=TOO_LARGE)`。边界用例：payload 恰好使整帧等于上限时**成功**，多 1 字节即失败 | 通过 | FR-4.3 |
 | **AC-74** | `conn_send_async` 带 `ICOMM_SEND_CLOSE_AFTER`：对端收到完整数据后观测到优雅 FIN，发送方 `on_done(OK)` 之后句柄为 `STALE_HANDLE`；对 `endpoint_send*`（扇出）使用该标志返回 `INVALID_ARGUMENT` | 通过 | FR-8.8 / FR-8.9 |
-| **AC-75** | accept 回调内 `conn_send_async` 既未带 `CLOSE_AFTER`、也未先 `conn_retain`/`conn_subscribe` → 返回 `INVALID_STATE`；回调内 `conn_subscribe` 后不 retain，连接保持打开并能持续收数据 | 通过 | FR-8.8 |
+| **AC-75** | accept 回调内 `conn_send_async` 既未带 `CLOSE_AFTER`、也未先 `conn_retain`/`conn_subscribe`、**且该端点未启用端点级订阅/拉取** → 返回 `INVALID_STATE`；回调内 `conn_subscribe` 后不 retain，连接保持打开并能持续收数据 | 通过 | FR-8.8 |
 | **AC-76** | 连接上有在途 `send_async` 时调用 `conn_destroy`：每条未完成发送的 `on_done` 恰好触发一次且 `code = CANCELLED`，连接随后关闭，无泄漏（AC-E3 口径） | 通过 | FR-8.9 |
 | **AC-77** | `queue_timeout_ms=N` 的异步发送在队列长期写不出去时：`on_done(ICOMM_ERR_TIMEOUT)` **恰好一次**、产生一条 `DROPPED(TIMEOUT)`；`queue_timeout_ms=0` 时同场景不超时；**开始写之后不再超时**（注入慢传输，写的中途不发生超时） | 通过 | FR-6.3 / FR-10.3 |
 | **AC-78** | 异步发送同步返回非 `OK`（含 `TOO_LARGE`、句柄失效）时 `on_done` **不被调用**；返回 `OK` 时 `on_done` 恰好一次。**边界**：`TOO_LARGE` 走同步返回，绝不走 `on_done` | 通过 | FR-6.1 / C ABI §6.2 |
@@ -348,6 +349,8 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | **AC-102** | `endpoint_destroy` 时存在 `ep_owner == ep` 的出站连接且有未发消息：连接**仍存活**（`conn_status` 可查），未发消息在其连接队列里继续发出、对端收齐；该连接不再计入 `conn_count(ep)` | 通过 | FR-8.10 |
 | **AC-101** | `monitor_ttl_ms > 24h` → `monitor_open` 返回 `INVALID_ARGUMENT`；`monitor_ttl_ms = 0` 不自动关闭；到期后 `poll` 返回 `CLOSED`（**v1 行为**，不含载荷捕获） | 通过 | FR-10.4 / C8 / C11 |
 | **AC-99** | 协议级错误帧：对端收到超限帧 / 畸形帧时回 `ERROR(reason, detail)` 再关闭。**接收方的观测面**：① 该连接在途 `on_done` 为 `DISCONNECTED`；② `log_fn` 的 ERROR 级别输出含 `reason` 与 `detail`；③ `iocomm_stats.protocol_errors` 递增 | 通过 | FR-5.4 / [线格式 §2.1](api/wire-format.md) / NFR-3 |
+| **AC-103** | **服务端扇出（N-01）**：纯服务端（不调 `connect*`）注册端点 A，3 个客户端分别连入并在 accept 回调内 `conn_subscribe`；随后 `endpoint_send(A, …)` 返回 `ICOMM_OK` 且 `out_delivered == 3`，3 个客户端均收到字节一致的消息；`conn_count(A) == 3`。对照组：3 条连接全部 `ep_owner == 0` 的出站连接时，对 A 扇出返回 `NO_RECEIVER` | 通过 | FR-8.6 / FR-8.11 |
+| **AC-104** | **端点级订阅（N-02）**：`endpoint_create` 后**不注册** `endpoint_accept`，只调 `iocomm_subscribe(ep, on_msg)`；客户端 `connect` 并发送 3 条消息 → `on_msg` 收到 3 条、`conn_count(ep) == 1`（入站连接被端点隐式持有，未被 FIN）。对照组改用 `endpoint_recv(ep)`（prompt 拉取）得到同样结果；再对照：同一 `ep` 上先 `endpoint_recv` 再 `endpoint_accept` → 后者返回 `INVALID_STATE`（§6.4 互斥） | 通过 | FR-8.11 / FR-6.8 |
 
 ### 5.2 平台验收
 
@@ -388,3 +391,4 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | 2026-10-21 | 落实 D-11（`registry_plugin` 删除，中心注册表标 v2 评估项） |
 | 2026-10-21 | M0 冻结前补三项缺口：① 异步发送补 **`send_options.queue_timeout_ms`**（0 = 无截止），并把 `on_done(OK)` 的完成点定为「**已完整交给传输层**」（同步路径同步对齐该含义；新增 AC-77 / AC-78；FR-10.3 的 `timeout` 口径）；② 补**节点名**（`runtime_config.node_name` + `iocomm_runtime_node_id()` / `iocomm_runtime_node_name()`，FR-9.4 / AC-79）；③ 补 **inproc** 的 FR-3.5–3.10 / AC-80–82，`listen_transport` 加入 `"inproc"`，并写明与 nng 的**有意分歧**（保留出站大小校验）。顺带落 B-01（UDP → v1.1）、B-04（FR-10.17 预算属 v1）、D-15（FR-3.4 措辞）、D-17 / D-19 / D-22 / D-23（AC 覆盖列与 AC 口径） |
 | 2026-10-21 | 四项设计收敛（[ADR-002](adr/ADR-002-message-addressing-and-ownership.md)）：① 删除 per-message 路由键 `key`（撤销 **AC-66**，编号不复用）；② 删除 `delivery_class` 三档，溢出策略改为按端点（FR-4.5 加「按端点」；AC-26 重写；溢出策略枚举值改为 1–4、0 = 默认；`ICOMM_DROP_FILTERED` 撤销后 `iocomm_drop_reason` **紧凑重编号为 1–6**，并补哨兵 `ICOMM_DROP_NONE = 0`）；③ `accept` 改为借用语义 + 唯一 `conn_retain` + `SEND_CLOSE_AFTER`（新增 FR-8.8 / FR-8.9 / AC-74–76；AC-29 / AC-33 重写）；④ 审计由独立句柄/环改为创建期 `audit_fn`（FR-10.13 措辞；AC-56 / AC-61 / AC-70 / AC-71 调整）。同时修正 AC-48 的「M8」、AC-68 的「M11」两处不存在的里程碑引用 |
+| 2026-11-03 | **N-01/N-02 裁决（方案 A：入站连接归监听端点）**：废止「入站连接不归属端点、不参与端点扇出」（`d8156aa` 引入，与 `architecture.md` endpoint 表、`c-abi.md`「所有已建立的连接」自相矛盾，导致纯服务端 `endpoint_send` 必返 `NO_RECEIVER`）。改为：**入站连接被持有后即成为监听端点的成员**——参与 `endpoint_send` 扇出、`conn_count(ep)`、与出站成员共用发送队列。持有动作扩为三种，新增**端点级持有**（FR-8.11）：启用 `iocomm_subscribe(ep)` / `endpoint_recv(ep)` 即隐式持有此后接入的入站连接，不注册 `endpoint_accept` 也能收消息；入站消息默认进端点接收队列，被 `conn_subscribe`/`conn_retain` 单独接管的连接改进连接队列（不双投）。同步修订：FR-8.6 / FR-8.8、AC-30（N 定义）/ AC-33（豁免）/ AC-39（入站计入）、新增 AC-103 / AC-104；`c-abi.md` §5.2 / §6.1 / §6.3 / §6.4、`architecture.md` §5.2、`README.md` 第 3 步注释 |

@@ -83,15 +83,19 @@ iocomm_subscription_t accept_sub = 0;
 iocomm_endpoint_accept(rt, ep, on_new_connection, user_data, &accept_sub, &err);
 
 /*    在 on_new_connection 里，连接句柄是**借用**的——只在回调期间有效。
- *    要持有它必须二选一，否则回调返回时连接会被优雅关闭（视为拒绝）：
+ *    要持有它必须三选一，否则回调返回时连接会被优雅关闭（视为拒绝）：
  *      iocomm_conn_subscribe(rt, conn, on_message, user, &sub, &err);      // 推送收（订阅即持有）
  *      iocomm_conn_retain(rt, conn, &err);                                 // 拉取收（显式持有）
+ *      端点级：先前已调 iocomm_subscribe(rt, ep, ...) / endpoint_recv(rt, ep, ...)
+ *              → 入站连接在交付前已由端点隐式持有，回调内**无需再表态**
+ *                （此模式下甚至可以不注册 endpoint_accept）
  *    「发一条就关」不是 conn_send_async + 什么都不做，而是显式带关闭标志：
  *      iocomm_send_options opt = ICOMM_SEND_OPTIONS_INIT;
  *      opt.flags = ICOMM_SEND_CLOSE_AFTER;
  *      iocomm_conn_send_async(rt, conn, &opt, msg, on_done, u, &op, &err);
  *    显式拒绝用 iocomm_conn_destroy(rt, conn, &err)。
- *    只保存句柄而不持有 = 未持有 → 连接被回收，句柄变 STALE。 */
+ *    只保存句柄而不持有 = 未持有 → 连接被回收，句柄变 STALE。
+ *    入站连接一旦持有，即成为本端点的**成员**，参与 endpoint_send 扇出。 */
 
 /* 4. 连接远端（客户端角色） */
 iocomm_conn_t conn = 0;

@@ -222,11 +222,13 @@ NodeId = u64
 
 | 对象 | 语义 | 发送目标 | 接收来源 |
 |---|---|---|---|
-| **endpoint** | 本地具名监听者 | **扇出**到它的所有连接 | 它的所有入站连接 |
+| **endpoint** | 本地具名监听者 | **扇出**到它的全部**成员连接**（入站 + `ep_owner == ep` 出站） | 它的所有入站连接（默认进入端点接收队列） |
 | **conn** | 一条双向连接 | **点对点** | 该连接 |
 | **subscription** | 推送回调的注册 | — | — |
 
-**入站连接**由 `iocomm_endpoint_accept()` 注册的回调交付。回调内的句柄是**借用**：只在回调期间有效。持有动作只有两种——**显式 `conn_retain`**（拉取）与**隐式 `conn_subscribe`**（推送，订阅即所有权）；两者都不调则回调返回时自动收回并以 FIN 优雅关闭。「发完即关」用发送选项 `ICOMM_SEND_CLOSE_AFTER`，`conn_send_async` 本身不是所有权开关。完整契约见 C ABI §5.2 与 [ADR-002](adr/ADR-002-message-addressing-and-ownership.md)。
+**入站连接**由 `iocomm_endpoint_accept()` 注册的回调交付。回调内的句柄是**借用**：只在回调期间有效。持有动作有**三种**——**显式 `conn_retain`**（拉取）、**隐式 `conn_subscribe`**（推送，订阅即所有权），以及**端点级持有**（该端点已启用 `iocomm_subscribe(ep)` / `endpoint_recv(ep)` 时，入站连接在 accept 时即由端点隐式持有，回调内无需再表态）；三者都不做则回调返回时自动收回并以 FIN 优雅关闭。「发完即关」用发送选项 `ICOMM_SEND_CLOSE_AFTER`，`conn_send_async` 本身不是所有权开关。完整契约见 C ABI §5.2 与 [ADR-002](adr/ADR-002-message-addressing-and-ownership.md)。
+
+> **成员资格（2026-11-03，N-01）**：入站连接被持有后即成为监听端点的**成员**，参与 `endpoint_send` 扇出与 `conn_count(ep)`，与 `ep_owner == ep` 的出站成员连接地位相同。**纯服务端（只 accept 不 connect）因此可以对全部入站连接做一次扇出广播。** 此前「入站连接不归属端点、不参与扇出」的规定已废止——它使服务端广播不可用，且与本节 `endpoint` 行自相矛盾。
 
 > **连接由 `connect*()`（出站）或 `accept`（入站）创建**，状态迁移在 `iocomm_conn_t` 上发生。关闭有四条路：`conn_destroy`（取消在途、丢弃缓冲、FIN）、`conn_close_graceful(linger_ms)`（flush 后关）、`ICOMM_SEND_CLOSE_AFTER`（发完即关）、`conn_abort`（RST 异常中止）。
 
@@ -437,7 +439,7 @@ enum ErrorCode {
 | Q4 | 控制面是否独立通道 | **v1 不独立**；控制面与数据面共用按端点的队列。v2 视需要再分 |
 | Q5 | 是否提供 per-message 路由键（`key`） | **v1 删除**（ADR-002）。控制用端点名；v2 若需过滤，走接收侧层级过滤 |
 | Q6 | 溢出策略按「投递类别」还是按端点 | **按端点**（ADR-002）。三类业务用三个端点表达；删 `delivery_class` 三档 |
-| Q7 | `accept` 的所有权模型 | **借用 + 唯一 `conn_retain`（subscribe 隐式持有）+ `CLOSE_AFTER`**（ADR-002）。不用「四选一接管」，也不用返回值枚举 |
+| Q7 | `accept` 的所有权模型 | **借用 + 持有动作三选一**：`conn_retain`（唯一显式）/ `conn_subscribe`（隐式）/ **端点级订阅（`iocomm_subscribe(ep)` / `endpoint_recv(ep)`，2026-11-03 增补）**；「发完即关」用 `CLOSE_AFTER`（**不是持有**）（ADR-002）。不用「四选一接管」，也不用返回值枚举 |
 | Q8 | 审计是否给独立句柄 / 环 | **不**。创建期不可变的 `audit_fn` 回调 sink；计数并入 `stats.audit_events`（ADR-002） |
 
 > **控制面落点**：`iocomm_runtime_start/stop/reconfigure/drain` 已在 C ABI §4 定义。
@@ -452,7 +454,7 @@ enum ErrorCode {
 |---|---|---|---|
 | **M0** | 骨架 | C ABI 头（C99 可编译）+ crate 划分 + CI 三平台构建 | AC-P1 / AC-P5 / AC-18 / AC-24 / AC-35 / AC-95 |
 | **M1** | inproc 闭环 | 句柄表（代际）+ Runtime + 端点/连接模型 + **跨进程名字表（§6.4）** + `inproc` 传输（FR-3.5–3.10） | AC-4 / AC-11 / AC-25 / AC-32 / AC-33 / AC-36 / AC-40 / AC-80 / AC-81 / AC-82 / AC-83 / AC-84 / AC-89 / AC-100 / AC-102 |
-| **M2** | TCP + 双向 | tcp 传输 + accept + connect + send/recv/subscribe + 异步排队超时 + **[线格式](api/wire-format.md)（HELLO 握手 · ERROR 帧 · 尺寸协商）** | AC-1 / AC-2 / AC-10 / AC-29 / AC-30 / AC-31 / AC-33b / AC-39 / AC-73 / AC-74 / AC-75 / AC-76 / AC-77 / AC-78 / AC-90 / AC-92 / AC-99 |
+| **M2** | TCP + 双向 | tcp 传输 + accept + connect + send/recv/subscribe + 异步排队超时 + **[线格式](api/wire-format.md)（HELLO 握手 · ERROR 帧 · 尺寸协商）** | AC-1 / AC-2 / AC-10 / AC-29 / AC-30 / AC-31 / AC-33b / AC-39 / AC-73 / AC-74 / AC-75 / AC-76 / AC-77 / AC-78 / AC-90 / AC-92 / AC-99 / AC-103 / AC-104 |
 | **M3** | 状态与监控 | 心跳 + 条件集 + 指标 + 诊断（JSON 结构见 AC-94）+ **消息监控（信封级）** | AC-3 / AC-5 / AC-6 / AC-12 / AC-13 / AC-15 / AC-20 / AC-27 / AC-28 / AC-37 / AC-41 / AC-42 / AC-43 / AC-44 / AC-45 / AC-53 / AC-55 / AC-57 / AC-59 / AC-64 / AC-68 / AC-71 / AC-72 / AC-86 / AC-91 / AC-94 / AC-101 |
 | **M4** | 发现 | 组播 + 单播 seed + 节点身份 + 阶段二端点能力 + **[发现线格式](api/wire-format.md#8-发现报文阶段一--阶段二)** | AC-7 / AC-9 / AC-14 / AC-16 / AC-21 / AC-22 / AC-23 / AC-34 / AC-38 / AC-79 / AC-85 / AC-87 / AC-93 |
 | **M5** | 本机 IPC | Linux unix socket + Windows 命名管道 | AC-P3 / AC-8 / AC-17 / AC-19 / AC-26 / AC-88 |
