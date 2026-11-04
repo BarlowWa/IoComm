@@ -166,16 +166,17 @@ const char* iocomm_strerror(int32_t code);  /* 静态存储期，不要 free */
 |---|---|
 | `iocomm_runtime_create` | `INVALID_ARGUMENT`（`cfg` 为 NULL / `max_message_size > 64 MiB` / 枚举非法 / **`node_id == 0` 时 `state_dir` 为空或不可写**）、`RESOURCE_EXHAUSTED`、`INTERNAL` |
 | `iocomm_runtime_start` / `iocomm_runtime_stop` / `iocomm_runtime_drain` | `STALE_HANDLE`、`INVALID_STATE`（Stopped 下 `start` 以外的写操作）、`WOULD_BLOCK`（manual `drain` 未排空）、`TIMEOUT`、`INTERNAL` |
-| `iocomm_runtime_run_once` / `iocomm_runtime_run_for` | `STALE_HANDLE`、`INVALID_STATE`（**owned 模式**下调用）、`INTERNAL`。**与 Runtime 状态无关**——manual 模式下 Created / Running / Stopped 均可调用（Stopped 下用于排空） |
+| `iocomm_runtime_run_once` / `iocomm_runtime_run_for` | `STALE_HANDLE`、`INVALID_STATE`（**owned 模式**下调用）、`INTERNAL`；**`run_once` 另有 `TIMEOUT` = 本轮空闲**（正常事件，非故障，见下方注释）。**与 Runtime 状态无关**——manual 模式下 Created / Running / Stopped 均可调用（Stopped 下用于排空） |
 | `iocomm_runtime_reconfigure` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`CLOSED`（Stopped 后）、`INTERNAL` |
 | `iocomm_runtime_node_id` / `iocomm_runtime_node_name` | `STALE_HANDLE`、`INVALID_ARGUMENT`（`buf` 为 NULL）、`RESOURCE_EXHAUSTED`（缓冲不足）、`INTERNAL` |
 | `iocomm_endpoint_create` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`ALREADY_EXISTS`（**同进程**已持有同名端点）、`CONFLICT`（端点名已被**他进程**占用）、`RESOURCE_EXHAUSTED`、`NOT_SUPPORTED`（未知 transport / 平台不支持）、`INTERNAL` |
 | `iocomm_endpoint_destroy` / `iocomm_conn_destroy` / `iocomm_conn_abort` | `STALE_HANDLE`、`INTERNAL` |
-| `iocomm_runtime_wakeup` | `STALE_HANDLE`、`INTERNAL` |
+| `iocomm_runtime_wakeup` | **无错误通道**（AC-95 豁免）；返回值为错误码，无 `err` 出参 |
 | `iocomm_endpoint_lookup` / `iocomm_endpoint_get` / `iocomm_conn_get` / `iocomm_discovery_snapshot_get` | `STALE_HANDLE`、`NOT_FOUND`、`INVALID_ARGUMENT`、`INTERNAL`（`snapshot_get` 另有 `NOT_FOUND` = index 越界） |
-| `iocomm_endpoint_count` / `iocomm_conn_count` / `iocomm_discovery_snapshot_count` | （无 `err` 通道失败以外的码）`STALE_HANDLE`、`INTERNAL` |
+| `iocomm_conn_count` / `iocomm_discovery_snapshot_count` | `STALE_HANDLE`、`INTERNAL`（走 `err`；出错返回 0 并置 `err`） |
+| `iocomm_endpoint_count` | **无错误通道**（AC-95 豁免）：签名无 `err`；`rt` 无效时返回 **0**，与「该 Runtime 没有端点」不可区分——调用方若需区分，用 `iocomm_endpoint_get` 或任何带 `err` 的入口探测 |
 | `iocomm_endpoint_name_state` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INTERNAL`（错误码仍走 `err`，返回值恒为 0） |
-| `iocomm_endpoint_local_addr` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`RESOURCE_EXHAUSTED`、`INTERNAL` |
+| `iocomm_endpoint_local_addr` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`（**纯出站端点**没有监听地址，见 §5.1c 规则 1）、`RESOURCE_EXHAUSTED`、`INTERNAL` |
 | `iocomm_endpoint_set_overflow` | `STALE_HANDLE`、`INVALID_ARGUMENT`（枚举非法）、`INTERNAL` |
 | `iocomm_endpoint_accept` / `iocomm_subscribe` / `iocomm_conn_subscribe` / `iocomm_conn_condition_subscribe` / `iocomm_endpoint_condition_subscribe` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`（`recv` 已启用；`conn_subscribe` 另有「该连接已由端点级订阅/拉取持有」，见 §5.2）、`RESOURCE_EXHAUSTED`、`INTERNAL` |
 | `iocomm_unsubscribe` / `iocomm_conn_close_graceful` / `iocomm_conn_retain` | `STALE_HANDLE`、`INVALID_STATE`、`WOULD_DEADLOCK`（loop 线程；`unsubscribe` 本订阅回调内除外）、`TIMEOUT`、`INTERNAL` |
@@ -183,13 +184,13 @@ const char* iocomm_strerror(int32_t code);  /* 静态存储期，不要 free */
 | `iocomm_connect_node` | 同 `iocomm_connect`，另加 `NOT_FOUND`（节点或端点成员不在发现表中，见 §5.2a） |
 | `iocomm_connect_async` / `iocomm_connect_node_async` | 同步返回：`STALE_HANDLE`、`INVALID_ARGUMENT`、`NOT_SUPPORTED`、`NOT_FOUND`（仅 `connect_node_async`，见 §5.2a）、`WOULD_DEADLOCK`、`RESOURCE_EXHAUSTED`、`INTERNAL`；其余结果走 `on_done` |
 | `iocomm_conn_send` / `iocomm_endpoint_send` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`、`TOO_LARGE`、`NO_RECEIVER`、`WOULD_BLOCK`、`DISCONNECTED`、`TIMEOUT`、`WOULD_DEADLOCK`、`CLOSED`、`INTERNAL` |
-| `iocomm_conn_send_async` / `iocomm_endpoint_send_async` | 同步返回：`STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`、`TOO_LARGE`、`WOULD_DEADLOCK`、`CLOSED`、`INTERNAL`；其余走 `on_done` |
+| `iocomm_conn_send_async` / `iocomm_endpoint_send_async` | 同步返回：`STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`、`TOO_LARGE`、`WOULD_DEADLOCK`、`CLOSED`、`RESOURCE_EXHAUSTED`（`op_id` 空间耗尽，见 §6.2）、`INTERNAL`；其余走 `on_done` |
 | `iocomm_send_cancel` | `STALE_HANDLE`、`NOT_FOUND`（op 已完成）、`INVALID_ARGUMENT`、`INTERNAL` |
 | `iocomm_endpoint_recv` / `iocomm_conn_recv` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`（已 subscribe）、`TIMEOUT`、`WOULD_DEADLOCK`、`CLOSED`、`INTERNAL` |
 | `iocomm_discovery_start` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`ALREADY_EXISTS`（已启动）、`NOT_SUPPORTED`、`RESOURCE_EXHAUSTED`、`INTERNAL` |
 | `iocomm_discovery_stop` | `STALE_HANDLE`、`INVALID_STATE`（未启动）、`WOULD_BLOCK`、`TIMEOUT`、`INTERNAL` |
 | `iocomm_discovery_snapshot_take` | `STALE_HANDLE`、`RESOURCE_EXHAUSTED`、`INTERNAL` |
-| `iocomm_discovery_snapshot_release` | `STALE_HANDLE`（无 `err` 通道，失败以返回值体现） |
+| `iocomm_discovery_snapshot_release` | **无错误通道**（AC-95 豁免）：返回值承载——`0` = 成功，`ICOMM_ERR_STALE_HANDLE` = 重复释放或快照句柄已失效，`ICOMM_ERR_INTERNAL` = 内部错误 |
 | `iocomm_monitor_open` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`RESOURCE_EXHAUSTED`、`INTERNAL` |
 | `iocomm_monitor_poll` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`CLOSED`（ttl 到期）、`WOULD_DEADLOCK`（loop 线程 `timeout_ms > 0`）、`TIMEOUT`、`INTERNAL` |
 | `iocomm_monitor_close` | `STALE_HANDLE`、`INVALID_STATE`、`WOULD_BLOCK`、`INTERNAL` |
@@ -203,8 +204,10 @@ const char* iocomm_strerror(int32_t code);  /* 静态存储期，不要 free */
 - **出参（`out_*` 指针）不得为 NULL**：所有 `out_*` / `err` 之外的输出指针传入 NULL → `INVALID_ARGUMENT`，
   唯一的例外是 `err`（可 NULL，见 §3.1）。
 - **豁免**：**没有错误通道**的函数不要求 `@errors`——`iocomm_runtime_destroy`、`iocomm_message_release`、
-  `iocomm_free_text`、`iocomm_strerror`、`iocomm_version_string`、`iocomm_abi_version`。
-  AC-95 的检查范围**排除这六个函数**（见 requirements.md AC-95 正文）。
+  `iocomm_free_text`、`iocomm_strerror`、`iocomm_version_string`、`iocomm_abi_version`、
+  `iocomm_runtime_wakeup`、`iocomm_endpoint_count`、`iocomm_discovery_snapshot_release`（共 **9** 个；
+  签名中都没有 `iocomm_error*`，失败只以返回值体现。见 §3.2.1 对应行的「无错误通道」标注）。
+  AC-95 的检查范围**排除这九个函数**（见 requirements.md AC-95 正文）。
 - 通用的「句柄无效」路径（`ICOMM_ERR_STALE_HANDLE`）与「参数为 NULL / 0」（`ICOMM_ERR_INVALID_ARGUMENT`）对**所有**接受句柄的函数默认成立，可在注释中统一省略，由本节兜底。
 
 ### 3.3 枚举与配置值的合法性
@@ -324,8 +327,9 @@ int32_t iocomm_runtime_start(iocomm_runtime_t rt, iocomm_error* err);
 int32_t iocomm_runtime_stop (iocomm_runtime_t rt, uint64_t timeout_ms, iocomm_error* err);
 
 /* 优雅关闭：owned 模式返回时保证已排空；
- * manual 模式返回 ICOMM_ERR_WOULD_BLOCK 表示仍有在途操作，
- * 调用方应继续 run_once 直到返回 ICOMM_OK。 */
+ * manual 模式返回 ICOMM_ERR_WOULD_BLOCK 表示仍有在途操作——
+ * 调用方在**外部循环**里交替调 `run_once` 与 `drain`，**直到 `drain` 返回 `ICOMM_OK`**
+ * （判据是 `drain` 的返回值，不是 `run_once` 的——`run_once` 空闲时返回 `TIMEOUT`，见 §4）。 */
 int32_t iocomm_runtime_drain(iocomm_runtime_t rt, uint64_t timeout_ms, iocomm_error* err);
 
 /* 热重配置：只接受**通信参数**，不接受业务参数。
@@ -374,10 +378,40 @@ int32_t iocomm_runtime_reconfigure(iocomm_runtime_t rt,
 
 void    iocomm_runtime_destroy(iocomm_runtime_t rt);  /* 强制关闭，取消在途 */
 
-/* ── 事件循环（manual 模式） ── */
+/* ── 事件循环（manual 模式） ──
+ *
+ * 两者都**只能在 manual 模式**下调用（owned 模式有 IO 线程 → `INVALID_STATE`），
+ * 且都**必须在 loop 线程上调用**（与 `run_once` 同属非线程安全入口，架构 §3.3）。
+ *
+ * `iocomm_runtime_run_once(rt, timeout_ms)`：驱动一轮 loop，等待至多 `timeout_ms`。
+ *   - 本轮处理了至少一件事（就绪 IO / 到期定时器 / 内部任务）→ `ICOMM_OK`；
+ *   - `timeout_ms` 内一件事都没有 → `ICOMM_ERR_TIMEOUT`，并**置 `err`**
+ *     （与本文件其余函数「非 OK 必置 err」一致，§3.1）。
+ *     **这是正常的空闲，不是故障**：不写日志、不计数、不产生审计事件。
+ *   - `timeout_ms = 0` = **只轮询一次不等待**：有就绪事件返回 `OK`，否则立即 `TIMEOUT`。
+ *   - 因此「本轮是否干了活」是**可观测的**——典型的单线程控制循环是
+ *       for (;;) {
+ *           (void)iocomm_runtime_run_once(rt, 100);   /* 空闲返回 TIMEOUT，无害 */
+ *           do_my_work();                             /* 空闲也要执行，故不能用 while(rc == OK) */
+ *           if (my_shutdown_requested) break;
+ *       }
+ *
+ * `iocomm_runtime_run_for(rt, duration_ms)`：**循环 `run_once`**，直到**累计**运行时长达到 `duration_ms`。
+ *   - 它不是新的等待语义，只是 `run_once` 的循环外壳：单次 `run_once` 的等待不超过剩余时长。
+ *   - `duration_ms == 0` → **一次都不跑**，直接返回 `ICOMM_OK`（空操作）。
+ *   - 正常跑满 → `ICOMM_OK`；**单次 `run_once` 的空闲 `TIMEOUT` 不向外传播**
+ *     （它只用来决定「继续循环」，否则空闲 Runtime 上 `run_for` 永远返回 `TIMEOUT`）。
+ *   - 中途出错（`STALE_HANDLE` / `INVALID_STATE` / `INTERNAL`）→ 立即返回该错误码，
+ *     不再跑满剩余时长。**`run_for` 从不返回 `TIMEOUT`**。
+ *   - `duration_ms` 用**单调时钟**累计（含 `run_once` 内部的空闲等待），不是墙钟差。
+ *
+ * 两者在 Runtime 为 **Stopped** 时同样合法（manual 模式的 `drain` 要靠它们排空，见上方状态机）。 */
 
 int32_t iocomm_runtime_run_once(iocomm_runtime_t rt, uint64_t timeout_ms, iocomm_error* err);
 int32_t iocomm_runtime_run_for (iocomm_runtime_t rt, uint64_t duration_ms, iocomm_error* err);
+/* 唤醒 loop 使其从等待中返回（用于跨线程投递后促成立即处理）。
+ * **无错误通道**：返回 0 = 成功，非 0 即错误码（`STALE_HANDLE` / `INTERNAL`），
+ * 没有 `err` 出参——因为调用方（任意线程）只需要「有没有生效」这一个事实（AC-95 豁免）。 */
 int32_t iocomm_runtime_wakeup  (iocomm_runtime_t rt);   /* 任意线程可调用 */
 
 /* ── 本机身份（FR-9.4） ── */
@@ -443,7 +477,8 @@ typedef struct iocomm_endpoint_config {
                                   * 违反任一项 → INVALID_ARGUMENT */
     uint64_t    name_len;
 
-    /* 监听地址：NULL = 不监听（仅用于连接远端） */
+    /* 监听地址。**`listen_transport` 与 `listen_addr` 的四格组合（唯一口径）见 §5.1c**：
+     * 只填 addr 不填 transport → INVALID_ARGUMENT（不猜默认传输）；两者都不填 = 纯出站端点（不监听）。 */
     const char* listen_transport;  /* "tcp" / "unix" / "pipe" / "inproc"（v1）；"udp" 为 v1.1 */
     uint64_t    listen_transport_len;
     const char* listen_addr;       /* "0.0.0.0:0" / "/run/x.sock" / "\\\\.\\pipe\\x" / inproc 名 */
@@ -526,7 +561,9 @@ int32_t iocomm_endpoint_lookup(iocomm_runtime_t rt,
                                const char* name, uint64_t name_len,
                                iocomm_endpoint_t* out_ep, iocomm_error* err);
 
-/* 枚举本地端点 */
+/* 枚举本地端点。
+ * `iocomm_endpoint_count` **无错误通道**（AC-95 豁免）：`rt` 无效时返回 **0**，
+ * 与「没有端点」不可区分——需要区分时改用带 `err` 的 `iocomm_endpoint_get` 探测。 */
 uint32_t iocomm_endpoint_count(iocomm_runtime_t rt);
 int32_t  iocomm_endpoint_get  (iocomm_runtime_t rt, uint32_t index,
                                iocomm_endpoint_t* out_ep, iocomm_error* err);
@@ -553,7 +590,8 @@ int32_t iocomm_endpoint_name_state(iocomm_runtime_t rt,
  * **返回的是「原始监听值」，不是发现表里的「通告值」**（2026-11-04，N-05 口径统一）：
  *  - 通配地址原样保留（`0.0.0.0:<实际端口>`）；端口 0 替换为实际分配端口；
  *  - 发现表 `endpoint_info.addr` 上报的是**可拨号通告值**（通配地址已替换为具体地址，见 FR-8.12 与 §5.2a「地址解析」）。
- * 两者用途不同：排障/自检用本函数，`connect_node` 用通告值。 */
+ * 两者用途不同：排障/自检用本函数，`connect_node` 用通告值。
+ * **纯出站端点**（`listen_transport` / `listen_addr` 均空，§5.1c 规则 1）没有监听地址 → `INVALID_STATE`。 */
 int32_t iocomm_endpoint_local_addr(iocomm_runtime_t rt, iocomm_endpoint_t ep,
                                    char* buf, uint64_t buf_len,
                                    uint64_t* out_len, iocomm_error* err);
@@ -600,6 +638,30 @@ int32_t iocomm_endpoint_local_addr(iocomm_runtime_t rt, iocomm_endpoint_t ep,
 > ② 同一 payload 在 tcp / inproc 上行为一致。代价只是每消息一次比较。
 > **出站强制；入站超限分支保留同一代码路径**（在 inproc 上不可达），不为 inproc 单独增加分叉。
 
+### 5.1c `listen_transport` / `listen_addr` 的组合语义（2026-11-04 定，N-14）
+
+两个字段是**成对**的。「空」的口径与 §1「显式长度」原则一致：**`NULL` 与 `len == 0` 都算空**
+（库一律用 `len` 定界，不看 NUL；`ptr != NULL && len == 0` 视同 `NULL`）。
+
+| # | `listen_transport` | `listen_addr` | `endpoint_create` 结果 |
+|---|---|---|---|
+| 1 | **空** | **空** | **成功，纯出站端点**——只作 `connect*` 的 `ep_owner` 与 `endpoint_send` 扇出宿主，不监听。`endpoint_local_addr()` 返回 `INVALID_STATE`（没有监听地址可报） |
+| 2 | **空** | 非空 | `INVALID_ARGUMENT`——**不猜默认传输**。`listen_addr` 的语法随 transport 而变（`"0.0.0.0:0"` / `/run/x.sock` / `\\.\pipe\x` / inproc 名），无法从字符串可靠推断 |
+| 3 | 非空 | **空** | `INVALID_ARGUMENT`——监听地址必填，没有「监听任意地址」的简写；要监听全部网卡就显式写 `"0.0.0.0:0"`。`"inproc"` 同样必填（§5.1b），规则一致 |
+| 4 | 非空 | 非空 | 按 transport 校验 `listen_addr` 格式 → 合法则监听；**未知传输名**（不是 v1 的四种）→ `NOT_SUPPORTED`；传输名合法但地址格式非法 → `INVALID_ARGUMENT` |
+
+补充规则：
+
+- 规则 4 中「未知传输名」优先于地址格式校验：非法传输名 + 非法地址 → `NOT_SUPPORTED`，不报 `INVALID_ARGUMENT`。
+- 规则 1 的纯出站端点**仍然注册端点名**（参与[架构 §6.4](../architecture.md) 的跨进程唯一性），也仍然可被 `endpoint_lookup` 查到、
+  可被 `endpoint_send` 扇出到其 `ep_owner` 连接；只是**不监听**，因此 `connect_node` 解析到它时无 `addr` 可用 →
+  发现报文里**不上报**（没有可拨号地址的端点不进入 `ENDPOINTS`）。
+- 上述判定全部发生在**注册之前**：任何一格返回错误时，端点名**不会被占用**（与[架构 §6.4](../architecture.md) 的 fail-fast 一致——
+  参数非法不会留下需要清理的半个注册）。调用方修正参数后可直接重试。
+- `iocomm_connect*` 的 `transport` / `addr` **都是必填**（没有「不监听」的对偶概念）：
+  任一为空 → `INVALID_ARGUMENT`；未知传输名 → `NOT_SUPPORTED`。
+- inproc 的 `publish_local = 1` → `INVALID_ARGUMENT`（§5.1b）与本表正交：规则 2/3 失败时 `publish_local` 不参与判定。
+
 ### 5.2 连接（入站与出站）
 
 **连接与端点分离**：`iocomm_endpoint_t` 是本地具名端点（监听者）；`iocomm_conn_t` 是一条**双向连接**，可能来自 `accept`（入站）或 `connect`（出站）。两者是**独立的句柄空间**。
@@ -614,8 +676,20 @@ int32_t iocomm_endpoint_local_addr(iocomm_runtime_t rt, iocomm_endpoint_t ep,
  *     不会被对端按「未握手 DATA」断链；
  *   - 握手期的连接是库的**内部会话占位**：不分配 iocomm_conn_t 句柄、不占 max_handles 名额、
  *     对应用完全不可见（conn_count / conn_get / 扇出都看不到它）；
- *   - 握手失败 / 超时 / 版本不兼容时**不产生 accept 回调**（只产生 log_fn 记录；收到对端
- *     ERROR 时另按 §2.1 计入 stats.protocol_errors）。
+ *   - **以下路径不产生 `accept` 回调**：
+ *     | 原因 | 连接被关闭 | 是否计入 `protocol_errors` |
+ *     |---|---|---|
+ *     | **握手层**：握手超时 | 是 | 本端判定：否 |
+ *     | **握手层**：版本不兼容 | 是 | 本端判定：否 |
+ *     | **握手层**：帧损坏（`MALFORMED`） | 是 | **是**（§2.1） |
+ *     | **握手层**：每端点握手会话数超限（§6.0，N-18） | 是（接受即关） | 否（WARN 日志） |
+ *     | **交付层**：交付时句柄表已满（§6.0，N-19） | 是（FIN） | 否（ERROR 日志） |
+ *     | **本地动作**：`endpoint_destroy` 关掉仍在握手期的会话（`endpoint_destroy` 规则 2） | 是（FIN） | 否 |
+ *     前五行是**对端的连接尝试**被拒；最后一行是**本端主动拆掉自己的端点**，与对端行为无关。
+ *     **`protocol_errors` 一律按线格式 §2.1 的唯一口径**：**收到** `ERROR`，或**判定收到的帧**损坏，才计入；
+ *     本端**发出** `ERROR` 不计入。因此「握手超时 / 版本不兼容」两行写「本端判定：否」只描述本端先判定并
+ *     发送 `ERROR` 的情形；对端先判定并回 `ERROR` 时，本端收到即计入——同一连接两端**各自**计数，不算重复。
+ *     日志级别以各出处为准：握手层见 [线格式 §2.1](wire-format.md) / §5 规则 7，交付层与本地动作见 §6.0 与本文 `endpoint_destroy` 规则 2。
  *   inproc **不跑 HELLO**，交付时点 = 连接建立即交付；peer_node_id 取对端 Runtime 的 node_id
  *   （同地址空间直接读取，仅在对端 Runtime 已销毁的竞态下为 0）。详见 [线格式 §5 / §7](wire-format.md)。
  *
@@ -862,7 +936,17 @@ int32_t  iocomm_conn_get  (iocomm_runtime_t rt, iocomm_endpoint_t ep,
 - **字节上限**：`runtime_config` **不提供独立字段**（避免多一个旋钮）。超过字节上限时按该端点策略处理（与条数满同口径）。
 - 默认值下：条数上限 1024 条，字节上限 64 MiB 每队列。最坏情况（消息都是 1 MiB）是 **64 条即满**，而不是 1024 条。
 - 句柄超限：`endpoint_create` / `connect*` / `subscribe` / `conn_subscribe` / `discovery_snapshot_take` / `monitor_open` 一律返回 `ICOMM_ERR_RESOURCE_EXHAUSTED`。
-- **握手期内部会话的上限（2026-11-03，N-03）**：交付前（双向 HELLO 完成前）的入站会话不占 `max_handles`，但**并非无界**——每端点并发握手会话数 ≤ `max_handles`（**独立计数器**，与六类句柄表互不占用，AC-84 不受影响），超出时**直接关闭新接受的 socket**（不触发 `accept` 回调）。该拒绝是**本地资源保护**，不是协议错误：**不**计入 `stats.protocol_errors`（该计数只统计接收侧收到 `ERROR` / 判定帧损坏），只写 `log_fn` 的 WARN，**不进队列统计**（`queue_dropped` 的定义是队列丢弃，被拒 socket 从未入队）。这是防止 5000 ms 握手窗口内 fd 耗尽的保护，不是配置项。
+- **握手期内部会话的上限（2026-11-03 定，2026-11-04 补口径 N-18）**：交付前（双向 HELLO 完成前）的入站会话不占 `max_handles`，但**并非无界**——**每端点**并发握手会话数 ≤ `max_handles`（**独立计数器**，与六类句柄表互不占用，AC-84 不受影响），超出时**直接关闭新接受的 socket**（不触发 `accept` 回调）。
+  **总上限因此是 `端点数 × max_handles`**（默认 4096 × 4096 ≈ 1.7e7）——它是一个**软上界**，不等于「Runtime 全局 fd 上限」。因此：
+  - 这条保护真正防的是「**单个端点**被大量半开会话淹没」——被拒的 socket 立刻关闭，不占用任何持续资源；
+    它不是句柄名额保护（握手会话本来就不进六类句柄表，见上一条），
+    **也不是**「Runtime 全局 fd 不会耗尽」——全局 fd 耗尽仍由部署侧的 `ulimit -n` / 系统上限兜底。
+  - 若要全局上限，`max_handles` 已经约束了**已交付**连接的总数；握手期会话没有对应的全局旋钮是 v1 的已知取舍（见 `open-questions.md` N-18），v1.1 可按需在 `runtime_config` 尾部追加（尾部追加不破坏 ABI）。
+  该拒绝是**本地资源保护**，不是协议错误：**不**计入 `stats.protocol_errors`（该计数只统计接收侧收到 `ERROR` / 判定帧损坏），也**不**计入 `queue_dropped`（被拒 socket 从未入队）；可见性只靠 `log_fn` 的 **WARN**（文本含**端点名**、当前握手会话数与上限，便于按端点聚合），不新增计数——理由是要给这两个既有计数保留唯一含义，宁可少一个可观测量也不让它们变成第二种口径。
+- **交付时句柄表已满（2026-11-04 定，N-19）**：双向 HELLO 已完成、但 `accept` 需要新 conn 句柄而句柄表已满时：
+  **不交付、不触发 `accept` 回调、立即 FIN 关闭该连接**（不留内部会话，避免长期占 fd），并写 `log_fn` 的 **ERROR**（含端点名与对端地址）。
+  与握手表满同口径——**不**计入 `protocol_errors` / `queue_dropped`。选择关闭而不是「排队等句柄」的理由：排队会无限期占用一条已可用的 socket，且在内存压力下（表满往往正是内存/资源紧张）把问题放大。
+  **调用方如何自查容量**：`iocomm_conn_count(rt, 0)` 是**实时存活连接数**（含 `ep_owner == 0` 的连接），可以直接读；但**六类句柄合计的占用没有公开计数**——调用方须据 `max_handles` 与自己创建的端点 / 订阅 / 快照 / 监控者数量自行估算。两者之差（如"连接数远小于 `max_handles` 却仍被拒"）说明名额被非连接类句柄占住。验收：**AC-113**。
 - **每个 Runtime 有独立的句柄表与计数**（AC-80 允许多个 Runtime 并存）。
 
 ### 6.1 溢出策略（每端点一个队列）
@@ -1023,7 +1107,28 @@ int32_t iocomm_endpoint_send_async(iocomm_runtime_t rt, iocomm_endpoint_t ep,
 /* 取消一个未完成的异步发送。on_done 仍会被调用一次，code = CANCELLED。
  * `op_id` 对 `conn_send_async` 是「一条消息」；对 `endpoint_send_async` 是**整组**：
  * 取消会移除该组中尚未开始写的全部队列项，`on_done` 仍只触发**一次**（整组计）。
- * 已经开始写的项不取消（与排队超时同口径，见 §6.2b）。 */
+ * 已经开始写的项不取消（与排队超时同口径，见 §6.2b）。
+ *
+ * **`op_id` 的唯一性（2026-11-04，N-10）**：
+ *  - **作用域 = 每个 Runtime**（不是每连接 / 每端点）。两路 `send_async` 产出的 `op_id` 互不相同；
+ *  - **单调分配、永不回绕**（与 `capture_id` 同口径）：从 1 起递增，`send_cancel` 因此不会误伤
+ *    一个复用了同一 ID 的历史操作；
+ *  - **耗尽**（64 位空间用完）→ `send_async` 返回 `RESOURCE_EXHAUSTED`，不静默回绕。
+ *    按 10 万条/秒估算需约 580 万年，实际不可达，但语义必须唯一。
+ *
+ * **`send_cancel` 对各类 `op_id` 的返回**：
+ *  | `op_id` 状态 | 返回 |
+ *  |---|---|
+ *  | 未完成、已成功取消 | `ICOMM_OK`；该 op 的 `on_done(CANCELLED)` **仍会触发**（恰好一次） |
+ *  | 已完成（`on_done` 已触发） | `ICOMM_ERR_NOT_FOUND`，**不再**触发 `on_done` |
+ *  | 已被取消过 | `ICOMM_ERR_NOT_FOUND`，**不再**触发 `on_done`（幂等失败） |
+ *  | 从未在此 Runtime 分配过 | `ICOMM_ERR_NOT_FOUND` |
+ *
+ *  **作用域是本 Runtime**：`op_id` 里不含 Runtime 标识，两个 Runtime 各自从 1 编号必然重号。
+ *  因此 `send_cancel(rt, op_id)` 的**唯一判据是「rt 自己的操作表里有没有这个 id、处于什么状态」**，
+ *  完全由上表决定；「这个数值原本属于哪个 Runtime」不是判据。所以把 A 的 `op_id` 传给 B **不在契约内**：
+ *  若 B 恰好有同号操作，就会真的取消 B 的那个操作——这正是 `op_id` 不可跨 Runtime 使用的原因。
+ *  实现上不额外编码 Runtime 标识：那会让 `op_id` 不再是简单计数器，且对正确用法毫无收益。 */
 int32_t iocomm_send_cancel(iocomm_runtime_t rt, uint64_t op_id,
                            iocomm_error* err);
 
@@ -1074,7 +1179,11 @@ typedef struct iocomm_message {
     uint64_t timestamp_ns;       /* 发送方事件时间 */
     uint64_t correlation_id;     /* 0 = 无 */
 
-    uint8_t  clock_synced;       /* 时间戳所在时钟是否已同步 */
+    uint8_t  clock_synced;       /* 时间戳所在时钟是否已同步。**v1 恒为 0**——本库不做时间同步
+                                  * （PTP/NTP 不在范围内），因此没有任何路径会把它置 1。
+                                  * 字段与线格式 `CLOCK_SYNCED` tag 保留给 v2；调用方必须按 0 处理，
+                                  * 不得据此认为「两端的 timestamp_ns 可比」（跨机比较本就不可信，
+                                  * 见架构 §6.5）。排序以 `sequence` 为权威，不以时间为权威。 */
     uint8_t  reserved1[7];
 } iocomm_message;
 
@@ -1241,6 +1350,12 @@ int32_t iocomm_discovery_start(iocomm_runtime_t rt,
                                const iocomm_discovery_config* cfg,
                                iocomm_discovery_fn fn, void* user,
                                iocomm_error* err);
+/* 本机发现的发布范围（FR-2.6，机制见架构 §6.4b）：
+ *   - 发布的是 `publish_local = 1` 的全部端点；**先于 discovery_start 创建的端点也会被扫描补发布**
+ *     （不需要保证 discovery_start 在端点创建之前）；
+ *   - 单元文件放在**每用户的固定目录**（`$XDG_RUNTIME_DIR/iocomm/local/` 等），**与本 Runtime 的 `state_dir` 无关**；
+ *     同一用户下的 Runtime 互相可见，跨用户不可见；
+ *   - `discovery_start` 无法写单元文件 → `INTERNAL`（不静默降级）；启动后写失败 → ERROR 日志并重试。 */
 int32_t iocomm_discovery_stop(iocomm_runtime_t rt, uint64_t timeout_ms, iocomm_error* err);
 
 /* 快照：晚加入者一次性获取当前节点表（含跨机组播/seed 与**本机注册表**条目）。
@@ -1258,7 +1373,8 @@ int32_t  iocomm_discovery_snapshot_get(iocomm_runtime_t rt,
                                        iocomm_snapshot_t s,
                                        uint32_t index, iocomm_node_info* out,
                                        iocomm_error* err);
-/* 非幂等：重复释放返回 STALE_HANDLE（与 FR-1.2 一致）。 */
+/* 非幂等：重复释放返回 STALE_HANDLE（与 FR-1.2 一致）。
+ * **无错误通道**（AC-95 豁免）：`0` = 成功，非 0 = 错误码（`STALE_HANDLE` / `INTERNAL`）。 */
 int32_t  iocomm_discovery_snapshot_release(iocomm_runtime_t rt, iocomm_snapshot_t s);
 ```
 

@@ -77,7 +77,7 @@ poll（任意线程，同一 monitor 串行）→ 取记录 → 调用方消费
 
 - `Transport`：tcp / unix-socket / named-pipe / inproc（udp 为 v1.1）
   > `inproc` 不参与发现：`publish_local = 1` 时 `endpoint_create` 返回 `INVALID_ARGUMENT`（见 [需求 FR-3.9](requirements.md)）
-- `Discovery`：multicast / unicast-seed / local-registry
+- `Discovery`：multicast / unicast-seed / local-registry（本机注册表的机制见 §6.4b）
 - `Clock`：生产用稳态时钟；测试用假时钟
 - `Transport` 的测试实现：`FakeTransport`（内存队列 + 故障注入）
 
@@ -111,10 +111,10 @@ manual 模式下**只有一个宿主线程**在驱动 loop。因此：
 |---|---|
 | 在 **loop 驱动线程**上调用同步 API | **返回 `ICOMM_ERR_WOULD_DEADLOCK`**，不阻塞 |
 | 在**其他线程**上调用同步 API | 允许；该线程阻塞等待，loop 线程继续推进 |
-| manual 模式下 `runtime_drain` | **不接受阻塞调用**——传入 `timeout_ms = 0` 并在外部循环调用 `run_once` 直到返回 `ICOMM_OK` |
+| manual 模式下 `runtime_drain` | **不接受阻塞调用**——传入 `timeout_ms = 0`，在外部循环里交替调 `run_once` 与 `drain`，**直到 `drain` 返回 `ICOMM_OK`**（判据是 `drain` 的返回值；`run_once` 空闲返回 `TIMEOUT`，不能拿它当完成信号） |
 | **manual 模式建连** | **必须用 `iocomm_connect_async` / `iocomm_connect_node_async`**；同步 `iocomm_connect` 在 loop 线程上会返回 `WOULD_DEADLOCK` |
 
-> **`iocomm_runtime_drain` 的「返回时保证已排空」只对 owned 模式成立**；manual 模式改为「drain 返回 `ICOMM_ERR_WOULD_BLOCK` 表示仍有在途操作，调用方应继续 `run_once`」。
+> **`iocomm_runtime_drain` 的「返回时保证已排空」只对 owned 模式成立**；manual 模式改为「drain 返回 `ICOMM_ERR_WOULD_BLOCK` 表示仍有在途操作，调用方应交替 `run_once` 与 `drain`，**直到 `drain` 返回 `ICOMM_OK`**」。
 
 > **尺寸协商与热更新的关系**：连接生效的 `max_frame_bytes` 在**握手完成时冻结**；之后 `tune_config.max_message_size`
 > 只影响**新建连接**与**尚未握手完成**的连接。这与 §5.0「热更新作用于全部端点」是**显式例外**，理由：
@@ -125,7 +125,7 @@ manual 模式下**只有一个宿主线程**在驱动 loop。因此：
 | 对象 | 线程安全 |
 |---|---|
 | `Runtime` / 端点 / 连接 / 订阅的**创建与销毁** | 否（调用方串行化） |
-| `run_once` / `run_for` | 否（仅 loop 线程） |
+| `run_once` / `run_for` | 否（仅 loop 线程）。**`run_once` 返回 `TIMEOUT` = 本轮空闲**（正常事件，非故障，C ABI §4） |
 | 端点/连接/订阅的 `count/get` | 否（loop 线程或串行化） |
 | `*_send_async` / `connect*_async` / `runtime_wakeup` | **是**（内部投递到 loop） |
 | `conn_send` / `endpoint_send` / `*_recv` / `unsubscribe`（同步） | 否（一句柄一线程；loop 线程调用返回 `WOULD_DEADLOCK`） |
@@ -330,7 +330,7 @@ Message {
     from                // 来源连接 → C ABI: iocomm_conn_t
     source_node         // 来源节点 NodeId
     sequence            // per-source 单调序号（排序与检漏的权威）；按连接计，重连后从 1 重计（§5.2c）
-    timestamp           // 发送方事件时间（附时钟同步状态）
+    timestamp           // 发送方事件时间（附时钟同步状态；v1 恒不同步，见 §6.5）
     correlation_id      // 请求-应答关联
     payload             // 不透明字节
 }
@@ -427,6 +427,49 @@ Message {
 - **残留处理**：Linux 抽象命名空间与 Windows 命名对象都由内核在进程退出时回收，**不需要手工清理**；pathname socket 的残留清理见 [平台支持 §3.2](platform-support.md)。
 - 判定结果不是原子的：`name_state()` 查询与随后 `create()` 之间存在 TOCTOU 窗口。**`create()` 的返回值才是权威**，`name_state()` 仅用于**注册前探测**与诊断/友好提示（三态：`FREE` / `HELD_BY_SELF` / `HELD_BY_OTHER`）。
 
+### 6.4b 本机注册表（`publish_local`，FR-2.6）
+
+> 2026-11-04 定（N-13）。§6.4 的名字锁只能回答「这个名字是否被占」，**承载不了端点能力表与上下线事件**，
+> 因此本机发现需要独立机制。
+
+**机制：每 Runtime 一个单元文件（unit file）+ 原子 rename**
+
+| 项 | 规则 |
+|---|---|
+| 目录 | **本机固定的每用户目录**（**不是** `state_dir`）：Linux `$XDG_RUNTIME_DIR/iocomm/local/`，无该变量时 `$HOME/.iocomm/local/`；Windows `%LOCALAPPDATA%\iocomm\local\`。所有 Runtime 共用这一个目录——"互相发现"与"`state_dir` 各自独立"（[§5.1b](#51b-节点身份nodeid) 要求每个 Runtime 用自己的 `state_dir`）本来就不该绑在一起 |
+| 文件名 | `<node_id>-<pid>.bin`（十六进制）。**不用 `process_epoch`**——它是 v1.1 的扩展（FR-9.3），v1 的任何 C 结构体里都没有；`pid` 在进程存活期内唯一，进程退出后的残留由租约清理。**同进程内两个 Runtime 被显式配成同一 `node_id`** 属配置错误（与「共用 `state_dir`」同类，§5.1b），文件名相同 → 后写者覆盖，库不检测 |
+| 内容 | **与 `BEACON` 的报文体同构**（[线格式 §8](api/wire-format.md)）：节点自述 TLV（`NODE_ID` / `NODE_NAME` / `WIRE_VERSION` / `LEASE_MS`）+ `ENDPOINTS` 条目（`name` + `transport` + **通告 `addr`**，取值规则与网络发现完全一致，见 [线格式 §8 规则 6](api/wire-format.md)）。**`NODE_NAME` 因此有明确来源**——就是 `runtime_config.node_name`，与组播路径的 `iocomm_node_info.name` 取值规则相同；不引入第二套格式 |
+| 写入 | **整文件重写 + rename 原子替换**（读者永远看不到半个文件）。触发点：端点创建 / 销毁 / 地址变化、以及**每个发现心跳周期**（刷新 mtime） |
+| 读取 | **每个发现心跳周期**扫描目录（不只启动时）：把每个**非本 Runtime** 的单元文件按 `BEACON` 的解析规则组装成**一条 `iocomm_node_info`**（`name` 取 `NODE_NAME` tag，`endpoints` 取 `ENDPOINTS` tag），并入同一节点表（与组播 / seed 的结果走同一条合并路径，`JOINED` / `UPDATED` / `LEFT` 语义不变）。**读取侧三道校验**：① 文件 ≤ `max_message_size`（防损坏或被恶意放大），超限视为无效并删除；② 文件内的 `NODE_ID` 必须与文件名中的 `<node_id>` 一致，不一致视为无效；③ **`NODE_ID` 相同的另一个单元文件**（同进程被配成同一 `node_id`，或显式 `node_id` 重复）→ 只保留 **mtime 较新**的那条，并在 `log_fn` 写一条 WARN（否则 `connect_node` 按 `node_id` 查找会歧义） |
+| 崩溃清理 | 进程 `kill -9` 后文件残留：**按 `lease_ms`（默认 6000 ms）判陈旧**——mtime 超过租约的文件被视作 `LEFT` 并删除（只由 `node_id` 最小的存活 Runtime 执行删除，避免多进程同时删同一文件的竞争；删失败无害）。与网络节点的租约语义同口径，不引入新概念 |
+| 停止 | `discovery_stop` 删除本 Runtime 的单元文件（等价一次 `LEFT`） |
+| 可见性 | **同一用户下的全部 Runtime 互相可见**，与各自的 `state_dir` 无关。跨用户不可见（目录在每用户命名空间内）——这与内核对命名管道的默认隔离同量级 |
+| 前置条件 | 目录**可写**。目录创建 / 首次写失败 → `discovery_start` 返回 `INTERNAL`。**与 `state_dir` 无关**：显式 `node_id` 且 `state_dir == NULL` 的 Runtime 同样可以 `publish_local` |
+
+**`discovery_start` 是不是前置条件：不是，但发布在它之后才开始**
+
+- `publish_local = 1` 的端点可以**先于** `discovery_start` 创建。`endpoint_create` **不因此失败**，也**不静默丢失**：
+  发布状态由 `discovery_start` 时**扫描现有端点**补齐（此后端点增删实时写文件）。
+- 理由：启动顺序天然是「创建 Runtime → 创建端点 → 启动发现」，强制 `discovery_start` 在前会让最常见的顺序报错；
+  而「本机发现」在 `discovery_start` 之前**本来就不存在**（没有发现就没有快照、没有事件），延迟发布于语义无损。
+- `discovery_stop` 之后新建的 `publish_local` 端点同样只是「未发布」，直到下次 `discovery_start`。
+
+**为什么是文件而不是共享内存段 / 命名对象**：
+
+- 共享内存段需要跨进程的**生命周期与并发写**协调（谁是 owner、崩溃后谁回收、读者如何避免撕裂），
+  而单元文件用 **rename 原子替换**把并发写问题直接消掉，生命周期由 mtime 租约兜底。
+- 同机进程数是**十几到几十**量级（<200 的 seed 档位），每周期读几十个小文件的开销可忽略；
+  发现本身已按 `heartbeat_ms`（默认 2000 ms）轮询，不需要额外引入 `inotify` / `ReadDirectoryChangesW` 两套平台事件 API。
+- 失败面收敛：唯一的外部依赖是**单元文件目录可写**（`$XDG_RUNTIME_DIR/iocomm/local/` 等），
+  与 `state_dir`（自动 `node_id` 的持久化目录）**互不依赖**——纯显式 `node_id` 部署同样能用本机发现。
+
+**失败处理（不做静默空操作）**：
+
+- `discovery_start` 无法创建目录 / 写入单元文件 → **返回 `INTERNAL`**（`message` 指明目录），发现不启动。
+- `discovery_start` **之后**的写入失败（磁盘满等）→ `log_fn` 的 **ERROR** 级记录，并**继续尝试下一次心跳写**
+  （瞬时失败可自愈）；此时持久失败会让本机对端看到该 Runtime 在 `lease_ms` 后 `LEFT`——这是可观测的正确降级。
+- `publish_local = 0` 的端点**不进入**单元文件（本机对端也看不到它）——与网络中「不参与发现」一致。
+
 ### 6.5 时间
 
 | 用途 | 时钟 |
@@ -435,6 +478,13 @@ Message {
 | 事件时间戳 / 日志 | 挂钟（附同步状态标志） |
 
 **排序以序号为权威，不以时间戳为权威**（跨机挂钟不可信）。
+
+> **`clock_synced` 在 v1 恒为 0**（2026-11-04，N-11）：本库不提供时间同步——PTP / NTP 不在范围，
+> 平台对 PTP 硬件时间戳的支持本身也在 [platform-support.md](platform-support.md) §7 的**待核实**清单里。
+> 该标志与线格式 `CLOCK_SYNCED` tag **保留但恒发 0**（而不是删除）：`iocomm_message` 是库写出的
+> 公开结构体，删字段要动 ABI 布局；而保留的成本只是一个恒 0 字节。线格式侧两种做法都合法
+> （删 tag 后再在 v2 追加同号也符合「只追加」规则），此处置与 ABI 对齐，避免两处不一致。
+> 调用方**必须**按 0 处理——「两端时间可比」在 v1 永远不成立。
 
 ---
 
@@ -514,8 +564,8 @@ enum ErrorCode {
 | # | 里程碑 | 产出 | 验收 |
 |---|---|---|---|
 | **M0** | 骨架 | C ABI 头（C99 可编译）+ crate 划分 + CI 三平台构建 | AC-P1 / AC-P5 / AC-18 / AC-24 / AC-35 / AC-95 |
-| **M1** | inproc 闭环 | 句柄表（代际）+ Runtime + 端点/连接模型 + **跨进程名字表（§6.4）** + **端点名格式/长度校验（§c-abi 5.1a）** + `inproc` 传输（FR-3.5–3.10） | AC-4 / AC-11 / AC-25 / AC-32 / AC-33 / AC-36 / AC-40 / AC-80 / AC-81 / AC-82 / AC-83 / AC-84 / AC-89 / AC-100 / AC-102 / **AC-108** |
-| **M2** | TCP + 双向 | tcp 传输 + accept + connect + send/recv/subscribe + 异步排队超时 + **[线格式](api/wire-format.md)（HELLO 握手 · ERROR 帧 · 尺寸协商）** + **端点级套接字参数（`TCP_NODELAY` / backlog）** | AC-1 / AC-2 / AC-10 / AC-29 / AC-30 / AC-31 / AC-33b / AC-39 / AC-73 / AC-74 / AC-75 / AC-76 / AC-77 / AC-78 / AC-90 / AC-92 / AC-99 / AC-103 / AC-104 / **AC-106** |
+| **M1** | inproc 闭环 | 句柄表（代际）+ Runtime + 端点/连接模型 + **跨进程名字表（§6.4）** + **端点名格式/长度校验（§c-abi 5.1a）** + **手动驱动语义（`run_once` / `run_for`）** + `inproc` 传输（FR-3.5–3.10） | AC-4 / AC-11 / AC-25 / AC-32 / AC-33 / AC-36 / AC-40 / AC-80 / AC-81 / AC-82 / AC-83 / AC-84 / AC-89 / AC-100 / AC-102 / **AC-108** / **AC-109** / **AC-111** |
+| **M2** | TCP + 双向 | tcp 传输 + accept + connect + send/recv/subscribe + 异步排队超时 + **[线格式](api/wire-format.md)（HELLO 握手 · ERROR 帧 · 尺寸协商）** + **端点级套接字参数（`TCP_NODELAY` / backlog）** | AC-1 / AC-2 / AC-10 / AC-29 / AC-30 / AC-31 / AC-33b / AC-39 / AC-73 / AC-74 / AC-75 / AC-76 / AC-77 / AC-78 / AC-90 / AC-92 / AC-99 / AC-103 / AC-104 / **AC-106** / **AC-110** / **AC-112** / **AC-113** |
 | **M3** | 状态与监控 | 心跳 + 条件集 + 指标 + 诊断（JSON 结构见 AC-94）+ **消息监控（信封级）** + **自动重连语义** | AC-3 / AC-5 / AC-6 / AC-12 / AC-13 / AC-15 / AC-20 / AC-27 / AC-28 / AC-37 / AC-41 / AC-42 / AC-43 / AC-44 / AC-45 / AC-53 / AC-55 / AC-57 / AC-59 / AC-64 / AC-68 / AC-71 / AC-72 / AC-86 / AC-91 / AC-94 / AC-101 / **AC-105** |
 | **M4** | 发现 | 组播 + 单播 seed + 节点身份 + 阶段二端点能力 + **[发现线格式](api/wire-format.md#8-发现报文阶段一--阶段二)** + **`connect_node` 地址解析** | AC-7 / AC-9 / AC-14 / AC-16 / AC-21 / AC-22 / AC-23 / AC-34 / AC-38 / AC-79 / AC-85 / AC-87 / AC-93 / **AC-107** |
 | **M5** | 本机 IPC | Linux unix socket + Windows 命名管道 | AC-P3 / AC-8 / AC-17 / AC-19 / AC-26 / AC-88 |
