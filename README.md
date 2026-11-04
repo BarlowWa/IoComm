@@ -135,6 +135,7 @@ iocomm_runtime_destroy(rt);
 | [待核实问题](docs/open-questions.md) | 文档审计发现的断链与口径矛盾（**未经核实**，处理前先看状态列） |
 | [ADR-001](docs/adr/ADR-001-language-and-platform.md) | 语言、平台、边界的决策与依据 |
 | [ADR-002](docs/adr/ADR-002-message-addressing-and-ownership.md) | 路由键 / 溢出策略 / accept 所有权 / 审计通道四项决策与依据 |
+| [ADR-003](docs/adr/ADR-003-endpoint-name-uniqueness.md) | 端点名唯一性：跨进程同名一律拒绝（含与 ZeroMQ / nng / mDNS / MQTT 的横向对照） |
 
 ---
 

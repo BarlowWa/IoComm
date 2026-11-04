@@ -403,6 +403,8 @@ Message {
 
 ### 6.4 跨进程名表（FR-1.5 三态查询）
 
+> **为什么是拒绝，而不是改名或接管**：与 ZeroMQ / nng 的「注册失败」、MQTT 的「会话接管」、mDNS 的「改名 + 持久化 + 告警」做过横向对照（Windows 命名管道作为「独占需显式声明」的旁证），结论见 [ADR-003](adr/ADR-003-endpoint-name-uniqueness.md)。
+
 `iocomm_endpoint_name_state()` 要区分「空闲 / 本进程持有 / 他进程持有」，必须有**跨进程协调机制**：
 
 | 平台 | 机制 |

@@ -482,6 +482,7 @@ typedef struct iocomm_endpoint_config {
 
 /* （原 ICOMM_ENDPOINT_UNIQUE 已移除：跨进程同名一律 CONFLICT，同进程同名 ALREADY_EXISTS，
  *   见架构 §6.4 与 FR-1.4；不再有「可多实例 + 自动改名」的开关。
+ *   决策依据见 [ADR-003](../adr/ADR-003-endpoint-name-uniqueness.md)。
  *   原 ICOMM_ENDPOINT_SECRET 已移除：监控改为独立的 iocomm_monitor_*，见 §9） */
 
 int32_t iocomm_endpoint_create(iocomm_runtime_t rt,
