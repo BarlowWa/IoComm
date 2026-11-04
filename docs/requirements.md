@@ -27,10 +27,11 @@
 | FR-1.1 | 注册具名端点（句柄），返回可用的句柄值 | P0 |
 | FR-1.2 | 注销句柄；**重复注销返回 `STALE_HANDLE`**（不幂等，以便区分「我记错了」与「已释放」） | P0 |
 | FR-1.3 | 按名字查询 / 枚举句柄 | P0 |
-| FR-1.4 | 重名注册被拒绝，返回明确错误码 | P0 |
-| FR-1.5 | 单实例排他注册（`unique` 语义），提供三态查询：空闲 / 本进程持有 / 他进程持有 | P1 |
+| FR-1.4 | 重名注册被拒绝，返回明确错误码。**（2026-11-04，N-16）** 同进程已持有同名 → `ALREADY_EXISTS`；**跨进程**已持有同名 → **`CONFLICT`**；两者都**不注册**、**不自动改名**。判定权威是 `create()` 的返回值 | P0 |
+| FR-1.5 | 提供三态名字查询：空闲 / 本进程持有 / 他进程持有。`endpoint_name_state()` **仅用于注册前探测与诊断**（与随后 `create()` 之间存在 TOCTOU 窗口，见[架构 §6.4](architecture.md#64-跨进程名表fr-15-三态查询)）；**权威判定是 `create()` 返回值**。不再是「单实例排他注册」开关——见 FR-1.4 | P1 |
 | FR-1.6 | 句柄失效后再使用 → 返回 `STALE_HANDLE`，**绝不 UB** | P0 |
 | FR-1.7 | 句柄数量上限可配置，超限明确报错 | P1 |
+| FR-1.8 | **端点名格式与长度上限（2026-11-04 新增，N-17）**：UTF-8 编码后 **1–255 字节**（按字节，不按字符）；不得含 NUL 字节；必须是合法 UTF-8；`/` 为层级分隔符，**不得有空段**（不以 `/` 开头/结尾、不出现 `//`）。任一违反 → `INVALID_ARGUMENT`。上限来源：**线格式** `ENDPOINTS` 条目用 `u16` 编码 `name_len`（C 结构体的 `iocomm_endpoint_info.name_len` 是 `uint64_t`），且发现报文按条目分页（单包 ≤ 1400 B）；255 B 保证单条端点条目远小于报文条目上限。详见 [C ABI §5.1a](api/c-abi.md) | P0 |
 
 **要求**：句柄是**整数 + 代际计数**（索引 + generation），不暴露裸指针。代际用于检测「槽位复用导致的误指向」。
 
@@ -88,10 +89,11 @@
 | FR-4.1 | 跨机 TCP 通信 | P0 |
 | FR-4.2 | UDP（含组播/广播） | **v1.1**（v1 的 `listen_transport` 不含 `"udp"`，见 [C ABI §5.1](api/c-abi.md)） |
 | FR-4.3 | 帧定界：有界消息，不暴露字节流 | P0 |
-| FR-4.4 | 自动重连（指数退避 + 抖动） | P0 |
+| FR-4.4 | 自动重连（指数退避 + 抖动）。**四件确定的语义（2026-11-04，N-06）**：① **复用同一 `iocomm_conn_t` 句柄**（重连窗口内句柄有效）；② 断开时在途未发项**逐条 `DROPPED(PEER_GONE)`**、`on_done(DISCONNECTED)`，**重连不重放**；③ `sequence` **随连接重置**（新连接从 1 起，跨重连顺序只能靠应用层 `correlation_id`）；④ **订阅保持**（挂在连接对象上），`peer_node_id` 以新握手结果更新。详见 [架构 §5.2c](architecture.md) | P0 |
 | FR-4.5 | 背压策略可配（阻塞 / 丢最旧 / 丢最新 / 报错），**按端点配置** | P0 |
 | FR-4.6 | 有界队列 + 溢出可见（丢弃计数） | P0 |
 | FR-4.7 | **队列双上限**：条数 ≤ `send_queue_max`（默认 1024），字节 ≤ `min(条数上限 × max_message_size, 64 MiB)`；两者先到者生效 | P0 |
+| FR-4.8 | **端点级套接字参数（2026-11-04 新增，N-12）**：TCP 的 `TCP_NODELAY` 与监听 `backlog` 可按端点配置（`endpoint_config` 尾部字段）或全局热更新（`tune_config`）。`tcp_nodelay` **默认开**（小消息低延迟优先于带宽）；`listen_backlog` 默认 **128**。0 一律表示「用默认 / 保持当前值」，与其它字段口径一致。v1 **不暴露**内核 keepalive 开关——半开检测依赖应用层心跳（FR-5.3） | P0 |
 
 ### FR-5 状态监控与控制
 
@@ -126,7 +128,7 @@
 | 编号 | 需求 | 优先级 |
 |---|---|---|
 | FR-8.1 | 显式连接远端地址（`transport` + `addr`）→ 得到**连接**句柄 | P0 |
-| FR-8.2 | 通过发现结果连接（`node_id` + 端点名） | P0 |
+| FR-8.2 | 通过发现结果连接（`node_id` + 端点名）。**地址解析规则（2026-11-04，N-05）**：在发现表的 `node_info.endpoints` 中按 `name` **精确匹配** → 取该条目的 `transport` + `addr`（**通告值**，见 FR-8.12）拨号；成员不存在 / 节点不存在 → `NOT_FOUND`；transport 未实现 → `NOT_SUPPORTED` | P0 |
 | FR-8.3 | 连接是双向的：出站连接也能接收对端数据 | P0 |
 | FR-8.4 | 发现阶段二上报**端点能力**（对端注册了哪些端点） | P0 |
 | FR-8.5 | **入站连接必须可被应用拿到**：`endpoint_accept` 回调交付连接句柄（**借用**：仅在回调期间有效）。**交付时点**：tcp/unix/pipe 上为**双向 HELLO 完成后**（此时 `peer_node_id` 必有值、连接已可发 DATA）；inproc 为**连接建立即交付**（无 HELLO，见 FR-3.5 / 线格式 §7）。握手期的连接是内部会话，不分配句柄、不占 `max_handles`；握手失败/超时**不触发** `accept` | P0 |
@@ -136,13 +138,14 @@
 | FR-8.10 | **端点销毁时的出站连接**：`ep_owner == ep` 的出站连接**继续存活**，未发项原子迁移到各自的连接队列（容量取 runtime 默认），不再计入该端点扇出 | P0 |
 | FR-8.9 | **连接的四种关闭**：`conn_destroy`（立即取消在途发送、丢弃缓冲、FIN，各回调一次 `CANCELLED`）/ `conn_close_graceful(linger_ms)`（flush 后关）/ `ICOMM_SEND_CLOSE_AFTER`（发完即关）/ `conn_abort`（RST 异常中止） | P0 |
 | FR-8.11 | **端点级接收（2026-11-03 新增）**：`iocomm_subscribe(ep)` / `iocomm_endpoint_recv(ep)` 一经启用，即**隐式持有**该端点此后的全部入站连接（accept 回调仍会触发，仅用于观测）；不注册 `endpoint_accept` 时同样可正常接收。入站消息默认进入**端点接收队列**；被 `conn_subscribe` / `conn_retain` 单独接管的连接改进入该连接的接收队列，不再参与端点级投递（不双投） | P0 |
+| FR-8.12 | **端点地址的通告值（2026-11-04 新增，N-05）**：库在发布端点能力（`ENDPOINTS` tag 与 `iocomm_endpoint_info.addr`）时，若 `listen_addr` 是通配地址（`0.0.0.0` / `[::]`）或端口为 0，则**替换为实际监听地址 + 实际端口**；实际地址仍是通配地址时，用**发送该发现报文所用 socket 的本地地址**替换。`iocomm_endpoint_local_addr()` 返回**原始监听值**（端口 0 时返回系统分配的实际端口，`0.0.0.0` 原样保留）。两者不混用：`endpoint_info.addr` = 可拨号通告值；`endpoint_local_addr()` = 本端监听事实 | P0 |
 
 ### FR-9 节点身份
 
 | 编号 | 需求 | 优先级 |
 |---|---|---|
 | FR-9.1 | 节点身份（`node_id`）跨进程重启**保持稳定** | P0 |
-| FR-9.2 | 支持显式配置或自动持久化（`state_dir`） | P0 |
+| FR-9.2 | 支持显式配置或自动持久化（`state_dir`）。**自动模式要求 `state_dir` 非空且可写**；不满足 → `runtime_create` 返回 `INVALID_ARGUMENT`（v1 **不派生**自 machine-id / 主机名 / MAC——见 [架构 §5.1b](architecture.md)） | P0 |
 | FR-9.3 | 同机多进程可共享同一主机身份，用进程实例区分（`process_epoch`） | **v1.1**（v1 语义：`node_id` 唯一标识**一个 Runtime 实例**，同机多进程各自独立） |
 | FR-9.4 | **节点名**：`runtime_config.node_name`（创建期不可变），随发现上报；本机可通过 `iocomm_runtime_node_id()` / `iocomm_runtime_node_name()` 查询 | P1 |
 
@@ -221,6 +224,7 @@
 | 业务语义控制（启动/校准/配方） | 越界 |
 | 国产私有指令集（LoongArch / MIPS64 / SW64） | 见 ADR-001；保持可移植 |
 | 硬实时承诺（任何 OS 上） | 端到端抖动无法保证 |
+| **内核 TCP keepalive 开关（v1 不暴露）** | 半开检测依赖应用层心跳（FR-5.3）：内核 keepalive 默认 2 小时、WS2016 缺 `TCP_KEEPIDLE`（架构 §6.2）。`endpoint_config` / `tune_config` 只暴露 `tcp_nodelay` 与 `listen_backlog`（FR-4.8） |
 | 32 位 / Win7 / Server 2008 R2 | 超出范围 |
 
 ### 4.1 安全边界（**必须显式声明**）
@@ -247,7 +251,7 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 |---|---|---|---|
 | AC-1 | 两进程（同机）互发消息，字节完全一致 | 通过 | FR-3.1 |
 | AC-2 | 两机（跨网）互发消息，字节完全一致 | 通过 | FR-4.1 |
-| AC-3 | 对端被 `kill -9` 后，N 秒内检测到并触发事件 | 通过（N 可配） | FR-3.3 / FR-5.3 |
+| AC-3 | 对端被 `kill -9` 后，N 秒内检测到并触发事件 | 通过（检测时间可调） | FR-3.3 / FR-5.3 |
 | AC-4 | 句柄失效后再使用返回 `STALE_HANDLE` | 通过 | FR-1.6 |
 | AC-5 | **回调内销毁端点/订阅** 返回 `WOULD_DEADLOCK`，进程不崩溃。**唯一例外**：在**本订阅自己的回调内**用 `unsubscribe` 取消本订阅 → `ICOMM_OK`（见 C ABI §6.4 @special） | 通过 | FR-6.7 |
 | AC-6 | 回调中调用同步 API 返回 `WOULD_DEADLOCK` | 通过 | FR-6.7 |
@@ -332,10 +336,10 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | **AC-83** | owned 模式：主线程**从不调用** `run_once` 也能完成一次建连 + 往返收发；IO 线程恒为 1（子进程内枚举线程数验证） | 通过 | FR-6.5 |
 | **AC-84** | `max_handles = 1` 时，第二次 `endpoint_create` 返回 `RESOURCE_EXHAUSTED`（不崩溃、不静默失败） | 通过 | FR-1.7 |
 | **AC-85** | `discovery_lease_ms = 3000`：正常心跳续期只产生一次 `JOINED`；停掉对端后 ≤ lease 产生一次 `LEFT`，且快照中该节点被移除 | 通过 | FR-2.3 |
-| **AC-86** | `FR-5.1` 四条件（**仅在已建立连接的句柄上观测**）：建连成功后 `connected = TRUE`、`lively = TRUE`；`healthy` 在**未满一个心跳判定周期前为 `UNKNOWN`**、满后变 `TRUE`；注入一次 `ERROR` 帧后 `healthy` 变 `FALSE`；`runtime_reconfigure` 后 `config_current` 由 `FALSE` 变 `TRUE`。**`connected = UNKNOWN` 的建连前/重连期观测已移出本 AC**——`iocomm_conn_status` 需要一个 conn 句柄，而 `connect*()` 在双向 HELLO 完成后才产出句柄（N-03），重连期是否有句柄取决于 N-06（是否复用）。待 N-06 定案后另补一条覆盖该子项的 AC（届时分配编号） | 通过 | FR-5.1 |
+| **AC-86** | `FR-5.1` 四条件（**仅在已建立连接的句柄上观测**）：建连成功后 `connected = TRUE`、`lively = TRUE`；`healthy` 在**未满一个心跳判定周期前为 `UNKNOWN`**、满后变 `TRUE`；注入一次 `ERROR` 帧后 `healthy` 变 `FALSE`；`runtime_reconfigure` 后 `config_current` 由 `FALSE` 变 `TRUE`。**`connected = UNKNOWN` 的建连前/重连期观测已移出本 AC**——`iocomm_conn_status` 需要一个 conn 句柄，而 `connect*()` 在双向 HELLO 完成后才产出句柄（N-03）。重连期该子项已在 **AC-105**（N-06 定案：句柄复用）覆盖 | 通过 | FR-5.1 |
 | **AC-87** | 发现快照：空快照 `count == 0` 且 `get(0)` 返回 `NOT_FOUND`；`index` 越界返回 `NOT_FOUND`；`release` 后再次 `release` 或任意 `get` 返回 `STALE_HANDLE` | 通过 | FR-2.8 |
 | **AC-88** | 对端进程被 `kill -9`：≤ N 秒产生断开事件；随后对端重启并重新 `listen` 同一 pathname socket / 管道名，**无需人工删除残留文件即成功** | 通过 | FR-3.3 / FR-3.4 |
-| **AC-89** | 两进程同时注册同名端点：**非 `UNIQUE`** 时第二实例 `create` 返回 `OK`，且端点实际名为 `<name>#<pid>`、`endpoint_name_state(<原名>)` = `HELD_BY_OTHER`；**`UNIQUE`** 时返回 `CONFLICT` 且未注册；同进程内重名一律 `ALREADY_EXISTS` | 通过 | FR-1.4 / FR-1.5 |
+| **AC-89** | 两进程同时注册同名端点：**第二实例 `create` 返回 `CONFLICT` 且未注册**（本机查不到该端点——`endpoint_lookup` 返回 `NOT_FOUND`；`endpoint_name_state(<原名>)` 仍报 `HELD_BY_OTHER`，由第一实例持有）；同进程内重名 → `ALREADY_EXISTS`，同样不注册。两种情形第二实例都拿不到可用端点句柄 | 通过 | FR-1.4 / FR-1.5 |
 | **AC-90** | **TLV 前向兼容**：测试用 `FakeTransport` 向接收方注入一帧，帧内带一个 v1 未定义的 tag（如 `0x00FF`，长度非 0）：接收方**正常投递**该消息、payload 与该帧里的一致、连接**不关闭**；同一帧去掉未知 tag 后结果完全相同（对照组）。再把该 tag 的 `len` 改成越界值 → 连接关闭并报帧损坏 | 通过 | [线格式 §3](api/wire-format.md#3-tlv-扩展区) / FR-4.3 |
 | **AC-91** | 一个**未产生 `SENT`** 的报错路径（`TOO_LARGE`、句柄无效）留有环空位：`poll` **取不到任何记录**，`monitor_stats.emitted` 不变；对照组（同样的消息在队列未满时正常发送）产生 `SENT` | 通过 | FR-10.15 / 线格式 §3 |
 | **AC-92** | `HELLO` 握手：① 双方互发后连接可用；② 未发 `HELLO` 直接发 `DATA` → 关闭且不投递；③ `min_version` 不满足 → `ERROR(VERSION_UNSUPPORTED)` 后关闭；④ `HELLO` 带 TLV → `ERROR(MALFORMED)`；⑤ **接收尺寸协商**：A 配 1 MiB、B 配 64 KiB，A 发 100 KiB → A 侧 `TOO_LARGE`（**不是** `on_done(OK)`）；⑥ 握手超时 → `ERROR(HANDSHAKE_TIMEOUT)` 后关闭；⑦ **交付时点**：`accept` 回调只在双向 HELLO 完成后触发——延迟对端发 `HELLO`（或故意只发 TCP 不握手）期间 `conn_count(ep)` 为 0、`accept` 未被调用；对端补发 `HELLO` 后 `accept` 触发一次且 `peer->peer_node_id == 对端 node_id`；握手超时/版本不兼容路径 `accept` **一次都不触发**（对照正常路径） | 通过 | [线格式 §2.1 / §5](api/wire-format.md) / FR-8.5 |
@@ -351,6 +355,10 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | **AC-99** | 协议级错误帧：对端收到超限帧 / 畸形帧时回 `ERROR(reason, detail)` 再关闭。**接收方的观测面**：① 该连接在途 `on_done` 为 `DISCONNECTED`；② `log_fn` 的 ERROR 级别输出含 `reason` 与 `detail`；③ `iocomm_stats.protocol_errors` 递增 | 通过 | FR-5.4 / [线格式 §2.1](api/wire-format.md) / NFR-3 |
 | **AC-103** | **服务端扇出（N-01）**：纯服务端（不调 `connect*`）注册端点 A，3 个客户端分别连入并在 accept 回调内 `conn_subscribe`；随后 `endpoint_send(A, …)` 返回 `ICOMM_OK` 且 `out_delivered == 3`，3 个客户端均收到字节一致的消息；`conn_count(A) == 3`。对照组：3 条连接全部 `ep_owner == 0` 的出站连接时，对 A 扇出返回 `NO_RECEIVER` | 通过 | FR-8.6 / FR-8.11 |
 | **AC-104** | **端点级订阅（N-02）**：`endpoint_create` 后**不注册** `endpoint_accept`，只调 `iocomm_subscribe(ep, on_msg)`；客户端 `connect` 并发送 3 条消息 → `on_msg` 收到 3 条、`conn_count(ep) == 1`（入站连接被端点隐式持有，未被 FIN）。对照组改用 `endpoint_recv(ep)`（prompt 拉取）得到同样结果；再对照：同一 `ep` 上先 `endpoint_recv` 再 `endpoint_accept` → 后者返回 `INVALID_STATE`（§6.4 互斥） | 通过 | FR-8.11 / FR-6.8 |
+| **AC-105** | **重连语义（N-06）**：客户端 `connect` 后对端 `kill -9`，再用**同一** endpoint/地址重启。① **句柄复用**：断开前后及重连成功后 `iocomm_conn_t` 不变（`conn_status` 在重连窗口内仍可调用）；重连窗口内 `connected = FALSE`（不是 `UNKNOWN`——句柄已存在且确知未连通），`lively` / `healthy` 在心跳窗口未满前为 `UNKNOWN`，重连成功且窗口满后均为 `TRUE`；② **在途不重放**：断开前入队的 3 条未发消息在断开时各产生 `DROPPED(PEER_GONE)`、异步 `on_done(DISCONNECTED)` 各一次，重连成功后对端**一条也收不到**；③ **序号重置**：重连后首条消息的 `sequence` 从 1 重新开始（不接续断开前的值）；④ **订阅保持**：断开前已 `conn_subscribe` 的回调在重连后**无需重新订阅**即继续收到消息，`conn_status.peer_node_id` 更新为新对端的 `node_id`、`reconnect_count` 递增 | 通过 | FR-4.4 / FR-5.1 |
+| **AC-106** | **端点级套接字参数（N-12）**：① `endpoint_config.tcp_nodelay = 0`（默认）与 `= 1` 时，`getsockopt(TCP_NODELAY)` 为 1、`= 2` 时为 0；非 0/1/2 → `endpoint_create` 返回 `INVALID_ARGUMENT`。② 同一参数在 `endpoint_config` 显式设 `2`、`tune_config.tcp_nodelay = 1` 时，按 §5.0「端点级 > tune」生效为端点值；`tune_config.tcp_nodelay` 只改**未被端点显式设置**的端点。③ `listen_backlog = 0` 时监听 socket 的 backlog 为 128（Linux `ss -lnt` 的 Send-Q 列），显式设 1 时同一时刻只允许 1 个已建立未 accept 的连接（第 2 个在 backlog 满后被拒/排队超时）；`tune_config.listen_backlog` 只对**新建**监听 socket 生效，已监听端点不变。④ 非 tcp / unix 传输（pipe / inproc）上设置这两个字段不报错（被忽略）；unix 上 `listen_backlog` 生效、`tcp_nodelay` 忽略 | 通过 | FR-4.8 |
+| **AC-107** | **`connect_node` 地址解析（N-05）**：服务端以 `listen_addr = "0.0.0.0:0"` 监听（系统分配端口），客户端从发现快照取 `node_info.endpoints` 的 `addr` → **不是** `0.0.0.0:0`，而是实际 IP:实际端口；`connect_node(node_id, 端点名)` 成功往返。失败路径：端点名不存在 → `NOT_FOUND`；`node_id` 不在发现表 → `NOT_FOUND`；端点条目的 `transport` 为未实现值 → `NOT_SUPPORTED` | 通过 | FR-8.2 / FR-8.12 |
+| **AC-108** | **端点名格式校验（N-17）**：`endpoint_create` 对以下名字各返回 `INVALID_ARGUMENT` 且**不注册**——① 空名（`name_len = 0`）；② `name_len = 256`（超 255 B）；③ 含 NUL 字节（如 `"a\0b"`，`name_len = 3`）；④ 空段：`"/a"`、`"a/"`、`"a//b"`；⑤ 非法 UTF-8（如孤立续字节 `"\x80"`、过长编码）。成功路径：`name_len = 255` 的 UTF-8 名、含 `/` 的合法层级名（`"plant3/line2/temp"`）均返回 `OK`。**区分度**：255 B 成功 vs 256 B 拒绝，边界两侧各一例 | 通过 | FR-1.8 |
 
 ### 5.2 平台验收
 
@@ -393,3 +401,6 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | 2026-10-21 | 四项设计收敛（[ADR-002](adr/ADR-002-message-addressing-and-ownership.md)）：① 删除 per-message 路由键 `key`（撤销 **AC-66**，编号不复用）；② 删除 `delivery_class` 三档，溢出策略改为按端点（FR-4.5 加「按端点」；AC-26 重写；溢出策略枚举值改为 1–4、0 = 默认；`ICOMM_DROP_FILTERED` 撤销后 `iocomm_drop_reason` **紧凑重编号为 1–6**，并补哨兵 `ICOMM_DROP_NONE = 0`）；③ `accept` 改为借用语义 + 唯一 `conn_retain` + `SEND_CLOSE_AFTER`（新增 FR-8.8 / FR-8.9 / AC-74–76；AC-29 / AC-33 重写）；④ 审计由独立句柄/环改为创建期 `audit_fn`（FR-10.13 措辞；AC-56 / AC-61 / AC-70 / AC-71 调整）。同时修正 AC-48 的「M8」、AC-68 的「M11」两处不存在的里程碑引用 |
 | 2026-11-03 | **N-01/N-02 裁决（方案 A：入站连接归监听端点）**：废止「入站连接不归属端点、不参与端点扇出」（`d8156aa` 引入，与 `architecture.md` endpoint 表、`c-abi.md`「所有已建立的连接」自相矛盾，导致纯服务端 `endpoint_send` 必返 `NO_RECEIVER`）。改为：**入站连接被持有后即成为监听端点的成员**——参与 `endpoint_send` 扇出、`conn_count(ep)`、与出站成员共用发送队列。持有动作扩为三种，新增**端点级持有**（FR-8.11）：启用 `iocomm_subscribe(ep)` / `endpoint_recv(ep)` 即隐式持有此后接入的入站连接，不注册 `endpoint_accept` 也能收消息；入站消息默认进端点接收队列，被 `conn_subscribe`/`conn_retain` 单独接管的连接改进连接队列（不双投）。同步修订：FR-8.6 / FR-8.8、AC-30（N 定义）/ AC-33（豁免）/ AC-39（入站计入）、新增 AC-103 / AC-104；`c-abi.md` §5.2 / §6.1 / §6.3 / §6.4、`architecture.md` §5.2、`README.md` 第 3 步注释 |
 | 2026-11-03 | **N-03 裁决（accept 交付时点 = 双向 HELLO 完成，方案 1）**：tcp/unix/pipe 上 `accept` 回调在双向 `HELLO` 完成后才触发，`peer_node_id` 必有真实值，回调内 `CLOSE_AFTER` 发首条 DATA 合法；握手期连接是内部会话（不分配句柄、不占 `max_handles`、应用不可见）；握手失败/超时不产生 `accept`。inproc 无 HELLO，交付时点 = 建立即交付，`peer_node_id` 取对端 Runtime `node_id`（竞态下才为 0）。同步修订：FR-8.5、AC-92 新增第 ⑦ 项；`c-abi.md` §5.2 / §6.0 / §6.1、`wire-format.md` §5 / §7、`architecture.md` §5.2 / §5.2b、`README.md` 第 3 步注释 |
+| 2026-11-04 | **N-04 / N-05 / N-06 / N-07 / N-12 处置**：① **N-04**：`node_id` 自动模式**只做 `state_dir` 持久化**，v1 **不派生**（machine-id / 主机名 / MAC 会违反「每 Runtime 独立」，掺随机盐会违反 FR-9.1）；`state_dir` 为空/不可写 → `INVALID_ARGUMENT`；FR-9.2 补充口径。② **N-05**：新增 **FR-8.12**（端点地址的**通告值**：通配地址/端口 0 替换为实际值，`endpoint_local_addr()` 仍返回原始监听值）与 FR-8.2 的解析规则（`name` 精确匹配 → `transport`+`addr`；`NOT_FOUND` / `NOT_SUPPORTED`）；新增 **AC-107**（归 M4）。③ **N-06**：FR-4.4 定四件事——句柄复用 / 断开即清空并 `DROPPED(PEER_GONE)` 不重放 / `sequence` 随连接重置 / 订阅保持且 `peer_node_id` 更新（架构新增 §5.2c）；新增 **AC-105**（归 M3），并回写 AC-86 的重连子项指向 AC-105。④ **N-07**：`heartbeat_ms = 2000`、`heartbeat_miss_limit = 3` 定为具体默认值（架构 §6.2 与 Healthy 定义、c-abi 注释同步，删除悬空引用）。⑤ **N-12**：新增 **FR-4.8** + `endpoint_config` / `tune_config` 尾部 `tcp_nodelay` / `listen_backlog` 字段（默认开 / 128；0 = 默认或保持）；**新增 AC-106**（归 M2）；v1 不暴露内核 keepalive（进非目标） |
+| 2026-11-04 | **N-16 处置（推翻 2026-10-22 的「允许第二实例 + 自动改名」）**：跨进程同名端点改为 **fail-fast**——`endpoint_create` 返回 **`CONFLICT` 且不注册**；同进程同名仍 `ALREADY_EXISTS`。**理由**：`<name>#<pid>` 是远端无法预测的寻址身份（`connect_node` 按 `name` 精确匹配），自动改名既未实现「第二实例可被发现」的初衷，又让 `connect_node` 可能连到错误进程；且与 FR-1.4（P0「重名注册被拒绝」）直接冲突。删除 `ICOMM_ENDPOINT_UNIQUE` 宏（`flags` 改为 v1 保留字段，非 0 → `INVALID_ARGUMENT`）；保留 `endpoint_name_state()` 三态查询（仅注册前探测/诊断，权威是 `create()` 返回值）。同步修订：FR-1.4 / FR-1.5、AC-89、架构 §6.4、c-abi §5.1 / §3.2.1 / §10 |
+| 2026-11-04 | **N-17 处置（端点名格式与长度上限）**：新增 **FR-1.8** + **AC-108**（归 M1）——端点名 UTF-8 编码后 **1–255 B**、不得含 NUL、合法 UTF-8、`/` 层级无空段，违反 → `INVALID_ARGUMENT`。补 [C ABI §5.1a](api/c-abi.md)（含与 `iocomm_endpoint_info.name_len`（`u16`）及 1400 B 发现分页的关系）。 |

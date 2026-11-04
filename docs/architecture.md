@@ -186,17 +186,35 @@ Handle = u64
 
 ```
 NodeId = u64
-  ├─ 落盘持久化：首次运行生成随机 64 位，写入配置目录
-  └─ 不可写时（只读文件系统）：从 machine-id / 主机名 / MAC 派生稳定哈希
+  ├─ 显式配置：runtime_config.node_id != 0，原样使用（稳定性由调用方保证）
+  └─ 自动：node_id == 0 时，在 state_dir 下持久化一个随机 64 位值
 ```
 
 - 配置入口：`iocomm_runtime_config.node_id`（0 = 自动）。
-- 自动模式下，库在 `state_dir` 下读写 `node_id` 文件；`state_dir` 通过配置指定。
+- **自动模式要求 `state_dir` 非空（`state_dir != NULL` 且 `state_dir_len > 0`）且可写**。
+  不满足（`state_dir` 为空、路径不存在、不是目录、创建/读取/写入文件失败）→
+  `iocomm_runtime_create` 返回 `INVALID_ARGUMENT`，`err.message` 指明「自动 `node_id` 需要可写的 `state_dir`，
+  或显式配置 `node_id`」。
+- 落盘文件：`<state_dir>/iocomm.nodeid`，内容为 16 位小写十六进制 + `\n`。首次以**原子创建**
+  （`O_CREAT | O_EXCL` / `CREATE_NEW`）写入；已存在则读取。文件内容不合法（长度/字符不符）→
+  `INVALID_ARGUMENT`（**不自动重新生成**——静默换号会破坏 FR-9.1）。
+- **v1 不提供任何宿主级派生**（2026-11-04 定，N-04）：**不读** machine-id / `MachineGuid` / 主机名 / MAC。
+  理由（两约束夹逼，唯一解）：
+  - 主机级纯函数（machine-id / 主机名 / MAC 哈希）在**同机多进程必然同值**，直接违反本节 v1 语义；
+  - 在派生值上掺「每进程随机盐」会让**重启后 `node_id` 变化**，违反 FR-9.1；
+  - 因此「无持久化又要求跨重启稳定 + 每 Runtime 独立」不可能同时成立。v1 的结论是：
+    **只读文件系统 / 无 `state_dir` 的场景一律要求调用方显式配置 `node_id`**（库拒绝自动模式，不猜测）。
+  - **Windows 与 Linux 同规则**：v1 不做 Windows 派生，不存在「Windows 派生源」的规定。
 - **v1 语义：`NodeId` 唯一标识一个 Runtime 实例**，同机多进程各自拥有独立 NodeId（不共享）。
   **含 `state_dir` 的情况也一样**：多个进程配置**同一个** `state_dir` 时，先创建者写入 `node_id` 文件，
   后创建者读到它会导致**共享同一 NodeId**——这是配置错误，库不检测（v1 无 `process_epoch` 可区分）。
   文档要求：**每个 Runtime 使用独立的 `state_dir`**；共用目录属未定义行为。
   「同机多进程共享主机身份、用 `(NodeId, process_epoch)` 区分」是 **v1.1** 的扩展（FR-9.3），v1 不实现 `process_epoch`，任何 C 结构体里也没有这个字段。
+
+> **N-04 的取舍（本项为实施方推荐，待确认）**：把「只读 / 无 `state_dir`」从「库自动派生」改为
+> 「要求显式 `node_id`」是**产品取舍**——它把部署负担推给调用方，换取 v1 语义自洽。若产品要求
+> 「无 `state_dir` 也能自动建号」，唯一自洽的替代是**放宽 v1「每 Runtime 独立」语义**（提前采用
+> v1.1 的 `process_epoch` 方案），那属需求变更，不在本项处置范围内。
 
 ### 5.2 对象模型：端点 / 连接 / 订阅
 
@@ -253,7 +271,8 @@ NodeId = u64
 
 > **图的读法（唯一口径，2026-11-03 N-03）**：`[仅首次调用]` 的三处出口（TCP 失败、握手失败/超时、成功）只发生在**调用方发起的那次 `connect*()`**；
 > 自动重连再次走 `Connecting → Handshaking → Connected` 时**没有**返回值，也**不再触发** `on_done`（AC-27「恰好一次」）。
-> 重连成功后 `iocomm_conn_t` 是否复用同一句柄，**待 N-06 定**；本图不对此作承诺。
+> **重连成功后复用同一个 `iocomm_conn_t` 句柄**（2026-11-04，N-06，见 §5.2c）——`Reconnecting → Connected`
+> 期间句柄始终有效，`iocomm_conn_status` 可查询；应用不需要（也不能）重新 `connect*()` 再换句柄。
 
 
 > **入站连接**不经 `Connecting`，但要经过 `Handshaking`（双向 HELLO）：
@@ -274,10 +293,35 @@ NodeId = u64
 |---|---|
 | `Connected` | True / False / Unknown |
 | `Lively` | True / False / Unknown |
-| `Healthy` | True / False / Unknown —— **定义**：最近一次心跳判定周期（`heartbeat_ms × max(heartbeat_miss_limit,1)`，默认 3 个心跳周期）内既**没有重连**、也**没有收到 `ERROR` 帧**；`Unknown` = 该连接尚未经历满一个周期 |
+| `Healthy` | True / False / Unknown —— **定义**：最近一次心跳判定周期（`heartbeat_ms × max(heartbeat_miss_limit, 1)`，**默认 `2000 ms × 3 = 6 s`**）内既**没有重连**、也**没有收到 `ERROR` 帧**；`Unknown` = 该连接尚未经历满一个周期 |
 | `ConfigCurrent` | True / False |
 
 上层按需查询，新增条件不破坏既有判断。**状态变化通过 `iocomm_condition_fn` 回调推送**（见 C ABI §8），同时保留拉取式查询。
+
+### 5.2c 自动重连语义（2026-11-04 定，N-06）
+
+自动重连（FR-4.4）只适用于**出站连接**（`connect*` 产出）；入站连接断开后由对端重连，本端不主动重拨。
+重连过程中确定四件事（对应的验收见 [需求 AC-105](requirements.md)）：
+
+1. **句柄复用**：重连成功前后是**同一个 `iocomm_conn_t`**。`Connecting / Handshaking / Reconnecting` 期间句柄
+   一直有效（可 `conn_status`、可查询条件集），应用不必观察重连过程。
+   `conn_destroy` / `conn_abort` 在重连窗口内同样可用，取消重连并关闭。
+2. **在途消息不跨重连保留**：连接断开的那一刻，该连接的发送队列中被摘除的项（`conn_send` 的点对点项、
+   以及该连接的扇出项）**逐条产生 `DROPPED(PEER_GONE)`**（若有监控者），对应的异步 `on_done` 报
+   `DISCONNECTED`（§5.2b 裁决表第 4 行）；**重连成功后不重放**。重连窗口内的新发送按 §6.1
+   「入队**前**已断开」处理（立即失败、不入队、不排队等重连）。理由：本库无 ACK/重传/去重/会话恢复
+   （§5.3），「跨重连保留」等于发明一套重放协议，且无法区分「对端已收到但没回 ACK」与「没收到」。
+3. **`sequence` 随连接重置**：`sequence` 是**连接级**序号（不是 `(source_node)` 全局序号）。新连接从 1 重新开始，
+   因此断开前后的序号**不可比**。跨重连的应用级顺序只能靠应用自己的 `correlation_id`（或 payload 内的业务序号）；
+   本库不做 `SEQ` 空洞检测的跨连接推断。
+4. **订阅保持、`peer_node_id` 更新**：订阅（`conn_subscribe` / `conn_retain` / `conn_condition_subscribe`）
+   挂在**连接对象**上，不是挂在 socket 上，重连后**自动恢复**，应用无需重新订阅。`peer_node_id` 在新握手
+   完成后**以对端 `HELLO` 的新值更新**（同一 `(addr, endpoint_name)` 可能被不同 `node_id` 的进程接管）；
+   `conn_status.reconnect_count` 与 `stats.reconnects` 各递增一次。
+
+> **为什么句柄复用而不是「重连后换新句柄 + 回调通知」**：换句柄会把「稳定句柄」变成一个需要应用维护
+> 代际映射的易错对象，且与 AC-27 的 `on_done` 生命周期（句柄由首次 `connect*` 产出、销毁时回收）不自洽。
+> 复用句柄的代价是：句柄在「断开→重连」窗口内仍可用，`connected` 条件必须能表达中间态（FR-5.1 的 `UNKNOWN/False`）。
 
 ### 5.3 消息
 
@@ -285,7 +329,7 @@ NodeId = u64
 Message {
     from                // 来源连接 → C ABI: iocomm_conn_t
     source_node         // 来源节点 NodeId
-    sequence            // per-source 单调序号（排序与检漏的权威）
+    sequence            // per-source 单调序号（排序与检漏的权威）；按连接计，重连后从 1 重计（§5.2c）
     timestamp           // 发送方事件时间（附时钟同步状态）
     correlation_id      // 请求-应答关联
     payload             // 不透明字节
@@ -325,9 +369,11 @@ Message {
 
 ### 6.2 心跳与存活
 
-- 应用层心跳（**不依赖内核 keepalive**，其默认 2 小时且 Windows Server 2016 缺 `TCP_KEEPIDLE`）。
+- 应用层心跳（**不依赖内核 keepalive**，其默认 2 小时且 Windows Server 2016 缺 `TCP_KEEPIDLE`）。v1 **不暴露**内核 keepalive 开关（见 [c-abi §5.1](api/c-abi.md) 非目标口径）。
 - 心跳带**序号 + 时间戳 + 双向确认**（消除单向故障盲区）。
-- 判定：连续 N 次未收到 → `Lively = False`；N 可配，默认 ≥ 3。
+- **默认值（唯一权威）**：`heartbeat_ms = 2000`、`heartbeat_miss_limit = 3`。两个字段都可配
+  （`tune_config` 热更新），但**默认即 3**，不是「≥ 3」的下界。
+- 判定：连续 `heartbeat_miss_limit` 次未收到对端心跳 → `Lively = False`；默认 3 次（= 6 s）。
 - 重连：**Full jitter 退避**（`random(0, min(cap, base*2^n))`），cap 10–30s。
 
 ### 6.3 发现
@@ -335,7 +381,8 @@ Message {
 **两阶段**（借鉴 DDS）：
 
 1. 阶段一：节点存在性（轻量心跳 + 地址）
-2. **阶段二：端点能力**（事件驱动，单播）——节点上报自己**注册了哪些句柄**，供远端 `connect` 使用
+2. **阶段二：端点能力**（事件驱动，单播）——节点上报自己**注册了哪些句柄**，供远端 `connect` 使用。
+   上报的 `addr` 是**通告值**（通配监听地址 / 端口 0 已替换为可拨号值）；`connect_node` 的「`node_id` + 端点名 → 地址」解析规则见 [C ABI §5.2a](api/c-abi.md) 与 [FR-8.12](requirements.md)（2026-11-04，N-05）。
 
 **三件套 + 一档**：
 
@@ -365,17 +412,18 @@ Message {
 | **本机 IPC（unix/pipe）** | 复用同一套名字锁；实际 socket 文件放 `/run/iocomm/` 或命名管道，不在 `/tmp` |
 
 **规则**：
-- **默认所有具名端点都做跨进程唯一性检查**（不要求 `UNIQUE` 标志），**与传输后端无关**——inproc 端点同样参与（inproc 的「跨进程隔离」只针对它自己的 `listen_addr`，见 [FR-3.6](requirements.md)）。
-- **`UNIQUE` 的可观测差异**（否则这个标志没有意义）：
-  | 情形 | `UNIQUE` | 非 `UNIQUE` |
+- **所有具名端点都做跨进程唯一性检查**，**与传输后端无关**——inproc 端点同样参与（inproc 的「跨进程隔离」只针对它自己的 `listen_addr`，见 [FR-3.6](requirements.md)）。
+- **注册判定（fail-fast，唯一口径）**：
+  | 情形 | `endpoint_create` 结果 | 是否注册 |
   |---|---|---|
-  | 首次注册 | `OK` | `OK` |
-  | 他进程已持有同名 | `CONFLICT`，**不注册** | `OK`，库**自动**以 `<name>#<pid>` 注册；`endpoint_name_state(<原名>)` = `HELD_BY_OTHER` |
-  | 本进程已持有同名 | `ALREADY_EXISTS` | `ALREADY_EXISTS` |
-  > 自动改名只发生在**跨进程**冲突时；同进程内重名一律 `ALREADY_EXISTS`（FR-1.4）。
+  | 首次注册 | `OK` | 是 |
+  | 他进程已持有同名 | **`CONFLICT`** | **否**（不自动改名） |
+  | 本进程已持有同名 | `ALREADY_EXISTS` | 否 |
+  - 跨进程同名**一律拒绝**：端点名是远端寻址身份（`connect_node` 按 `name` 精确匹配，见 [C ABI §5.2a](api/c-abi.md)），若自动改名为 `<name>#<pid>`，远端无法预测该身份，`connect_node` 可能连到错误进程。与 [FR-1.4](requirements.md)（P0「重名注册被拒绝」）一致；见 [§6 演进记录](requirements.md#6-需求演进记录) 2026-11-04。
+  - 没有「单实例 / 可多实例」的开关——所有端点名都按上表处理。
 - 名字 → 锁的映射用**稳定哈希**（同一名字在同一机器上恒定）。
 - **残留处理**：Linux 抽象命名空间与 Windows 命名对象都由内核在进程退出时回收，**不需要手工清理**；pathname socket 的残留清理见 [平台支持 §3.2](platform-support.md)。
-- 判定结果不是原子的：`name_state()` 查询与随后 `create()` 之间存在 TOCTOU 窗口。**`create()` 的返回值才是权威**，`name_state()` 仅用于诊断与友好提示。
+- 判定结果不是原子的：`name_state()` 查询与随后 `create()` 之间存在 TOCTOU 窗口。**`create()` 的返回值才是权威**，`name_state()` 仅用于**注册前探测**与诊断/友好提示（三态：`FREE` / `HELD_BY_SELF` / `HELD_BY_OTHER`）。
 
 ### 6.5 时间
 
@@ -464,10 +512,10 @@ enum ErrorCode {
 | # | 里程碑 | 产出 | 验收 |
 |---|---|---|---|
 | **M0** | 骨架 | C ABI 头（C99 可编译）+ crate 划分 + CI 三平台构建 | AC-P1 / AC-P5 / AC-18 / AC-24 / AC-35 / AC-95 |
-| **M1** | inproc 闭环 | 句柄表（代际）+ Runtime + 端点/连接模型 + **跨进程名字表（§6.4）** + `inproc` 传输（FR-3.5–3.10） | AC-4 / AC-11 / AC-25 / AC-32 / AC-33 / AC-36 / AC-40 / AC-80 / AC-81 / AC-82 / AC-83 / AC-84 / AC-89 / AC-100 / AC-102 |
-| **M2** | TCP + 双向 | tcp 传输 + accept + connect + send/recv/subscribe + 异步排队超时 + **[线格式](api/wire-format.md)（HELLO 握手 · ERROR 帧 · 尺寸协商）** | AC-1 / AC-2 / AC-10 / AC-29 / AC-30 / AC-31 / AC-33b / AC-39 / AC-73 / AC-74 / AC-75 / AC-76 / AC-77 / AC-78 / AC-90 / AC-92 / AC-99 / AC-103 / AC-104 |
-| **M3** | 状态与监控 | 心跳 + 条件集 + 指标 + 诊断（JSON 结构见 AC-94）+ **消息监控（信封级）** | AC-3 / AC-5 / AC-6 / AC-12 / AC-13 / AC-15 / AC-20 / AC-27 / AC-28 / AC-37 / AC-41 / AC-42 / AC-43 / AC-44 / AC-45 / AC-53 / AC-55 / AC-57 / AC-59 / AC-64 / AC-68 / AC-71 / AC-72 / AC-86 / AC-91 / AC-94 / AC-101 |
-| **M4** | 发现 | 组播 + 单播 seed + 节点身份 + 阶段二端点能力 + **[发现线格式](api/wire-format.md#8-发现报文阶段一--阶段二)** | AC-7 / AC-9 / AC-14 / AC-16 / AC-21 / AC-22 / AC-23 / AC-34 / AC-38 / AC-79 / AC-85 / AC-87 / AC-93 |
+| **M1** | inproc 闭环 | 句柄表（代际）+ Runtime + 端点/连接模型 + **跨进程名字表（§6.4）** + **端点名格式/长度校验（§c-abi 5.1a）** + `inproc` 传输（FR-3.5–3.10） | AC-4 / AC-11 / AC-25 / AC-32 / AC-33 / AC-36 / AC-40 / AC-80 / AC-81 / AC-82 / AC-83 / AC-84 / AC-89 / AC-100 / AC-102 / **AC-108** |
+| **M2** | TCP + 双向 | tcp 传输 + accept + connect + send/recv/subscribe + 异步排队超时 + **[线格式](api/wire-format.md)（HELLO 握手 · ERROR 帧 · 尺寸协商）** + **端点级套接字参数（`TCP_NODELAY` / backlog）** | AC-1 / AC-2 / AC-10 / AC-29 / AC-30 / AC-31 / AC-33b / AC-39 / AC-73 / AC-74 / AC-75 / AC-76 / AC-77 / AC-78 / AC-90 / AC-92 / AC-99 / AC-103 / AC-104 / **AC-106** |
+| **M3** | 状态与监控 | 心跳 + 条件集 + 指标 + 诊断（JSON 结构见 AC-94）+ **消息监控（信封级）** + **自动重连语义** | AC-3 / AC-5 / AC-6 / AC-12 / AC-13 / AC-15 / AC-20 / AC-27 / AC-28 / AC-37 / AC-41 / AC-42 / AC-43 / AC-44 / AC-45 / AC-53 / AC-55 / AC-57 / AC-59 / AC-64 / AC-68 / AC-71 / AC-72 / AC-86 / AC-91 / AC-94 / AC-101 / **AC-105** |
+| **M4** | 发现 | 组播 + 单播 seed + 节点身份 + 阶段二端点能力 + **[发现线格式](api/wire-format.md#8-发现报文阶段一--阶段二)** + **`connect_node` 地址解析** | AC-7 / AC-9 / AC-14 / AC-16 / AC-21 / AC-22 / AC-23 / AC-34 / AC-38 / AC-79 / AC-85 / AC-87 / AC-93 / **AC-107** |
 | **M5** | 本机 IPC | Linux unix socket + Windows 命名管道 | AC-P3 / AC-8 / AC-17 / AC-19 / AC-26 / AC-88 |
 | **M6** | 平台与加固 | 麒麟/UOS 实机 + glibc 2.17 基线 + soak | AC-P1 / AC-P2 / AC-P3 / AC-P4 / AC-P5 / AC-E1 / AC-E2 / AC-E3 / AC-E4 / AC-E5 / AC-E6 |
 | **M7** | **v1.1** 载荷捕获与审计 | arena / 限速 / 双 TTL / dump / 审计 sink 回调（`audit_fn`）/ SLOW / **UDP 传输** / 错误环（FR-5.5b）/ `process_epoch`（FR-9.3） | AC-46 / AC-47 / AC-48 / AC-49 / AC-50 / AC-51 / AC-52 / AC-54 / AC-56 / AC-60 / AC-61 / AC-62 / AC-63 / AC-65 / AC-67 / AC-69 / AC-58 / AC-70 / AC-71b / AC-96 / AC-97 / AC-98 |

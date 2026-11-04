@@ -147,8 +147,9 @@ const char* iocomm_strerror(int32_t code);  /* 静态存储期，不要 free */
 每个公开函数**必须**在其头文件注释中以 `@errors` 列出**全部可能返回码**（`ICOMM_OK` 除外），例如：
 
 ```c
- * @errors ICOMM_ERR_INVALID_ARGUMENT  ep == 0 或 cfg 为 NULL
- * @errors ICOMM_ERR_ALREADY_EXISTS    name 已被占用（同进程或他进程）
+ * @errors ICOMM_ERR_INVALID_ARGUMENT  ep == 0 / cfg 为 NULL / 端点名格式或长度非法（§5.1a）
+ * @errors ICOMM_ERR_ALREADY_EXISTS    同进程已有同名端点
+ * @errors ICOMM_ERR_CONFLICT          端点名已被他进程占用（不注册、不自动改名）
  * @errors ICOMM_ERR_RESOURCE_EXHAUSTED 句柄数已达 max_handles
 ```
 
@@ -163,12 +164,12 @@ const char* iocomm_strerror(int32_t code);  /* 静态存储期，不要 free */
 
 | 函数族 | 可能的错误码（`OK` 除外） |
 |---|---|
-| `iocomm_runtime_create` | `INVALID_ARGUMENT`（`cfg` 为 NULL / `max_message_size > 64 MiB` / 枚举非法）、`RESOURCE_EXHAUSTED`、`INTERNAL` |
+| `iocomm_runtime_create` | `INVALID_ARGUMENT`（`cfg` 为 NULL / `max_message_size > 64 MiB` / 枚举非法 / **`node_id == 0` 时 `state_dir` 为空或不可写**）、`RESOURCE_EXHAUSTED`、`INTERNAL` |
 | `iocomm_runtime_start` / `iocomm_runtime_stop` / `iocomm_runtime_drain` | `STALE_HANDLE`、`INVALID_STATE`（Stopped 下 `start` 以外的写操作）、`WOULD_BLOCK`（manual `drain` 未排空）、`TIMEOUT`、`INTERNAL` |
 | `iocomm_runtime_run_once` / `iocomm_runtime_run_for` | `STALE_HANDLE`、`INVALID_STATE`（**owned 模式**下调用）、`INTERNAL`。**与 Runtime 状态无关**——manual 模式下 Created / Running / Stopped 均可调用（Stopped 下用于排空） |
 | `iocomm_runtime_reconfigure` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`CLOSED`（Stopped 后）、`INTERNAL` |
 | `iocomm_runtime_node_id` / `iocomm_runtime_node_name` | `STALE_HANDLE`、`INVALID_ARGUMENT`（`buf` 为 NULL）、`RESOURCE_EXHAUSTED`（缓冲不足）、`INTERNAL` |
-| `iocomm_endpoint_create` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`ALREADY_EXISTS`、`CONFLICT`、`RESOURCE_EXHAUSTED`、`NOT_SUPPORTED`（未知 transport / 平台不支持）、`INTERNAL` |
+| `iocomm_endpoint_create` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`ALREADY_EXISTS`（**同进程**已持有同名端点）、`CONFLICT`（端点名已被**他进程**占用）、`RESOURCE_EXHAUSTED`、`NOT_SUPPORTED`（未知 transport / 平台不支持）、`INTERNAL` |
 | `iocomm_endpoint_destroy` / `iocomm_conn_destroy` / `iocomm_conn_abort` | `STALE_HANDLE`、`INTERNAL` |
 | `iocomm_runtime_wakeup` | `STALE_HANDLE`、`INTERNAL` |
 | `iocomm_endpoint_lookup` / `iocomm_endpoint_get` / `iocomm_conn_get` / `iocomm_discovery_snapshot_get` | `STALE_HANDLE`、`NOT_FOUND`、`INVALID_ARGUMENT`、`INTERNAL`（`snapshot_get` 另有 `NOT_FOUND` = index 越界） |
@@ -178,8 +179,9 @@ const char* iocomm_strerror(int32_t code);  /* 静态存储期，不要 free */
 | `iocomm_endpoint_set_overflow` | `STALE_HANDLE`、`INVALID_ARGUMENT`（枚举非法）、`INTERNAL` |
 | `iocomm_endpoint_accept` / `iocomm_subscribe` / `iocomm_conn_subscribe` / `iocomm_conn_condition_subscribe` / `iocomm_endpoint_condition_subscribe` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`（`recv` 已启用；`conn_subscribe` 另有「该连接已由端点级订阅/拉取持有」，见 §5.2）、`RESOURCE_EXHAUSTED`、`INTERNAL` |
 | `iocomm_unsubscribe` / `iocomm_conn_close_graceful` / `iocomm_conn_retain` | `STALE_HANDLE`、`INVALID_STATE`、`WOULD_DEADLOCK`（loop 线程；`unsubscribe` 本订阅回调内除外）、`TIMEOUT`、`INTERNAL` |
-| `iocomm_connect` / `iocomm_connect_node` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`NOT_SUPPORTED`、`TIMEOUT`、`DISCONNECTED`、`NO_RECEIVER`、`WOULD_DEADLOCK`、`RESOURCE_EXHAUSTED`、`INTERNAL` |
-| `iocomm_connect_async` / `iocomm_connect_node_async` | 同步返回：`STALE_HANDLE`、`INVALID_ARGUMENT`、`NOT_SUPPORTED`、`WOULD_DEADLOCK`、`RESOURCE_EXHAUSTED`、`INTERNAL`；其余结果走 `on_done` |
+| `iocomm_connect` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`NOT_SUPPORTED`、`TIMEOUT`、`DISCONNECTED`、`NO_RECEIVER`、`WOULD_DEADLOCK`、`RESOURCE_EXHAUSTED`、`INTERNAL` |
+| `iocomm_connect_node` | 同 `iocomm_connect`，另加 `NOT_FOUND`（节点或端点成员不在发现表中，见 §5.2a） |
+| `iocomm_connect_async` / `iocomm_connect_node_async` | 同步返回：`STALE_HANDLE`、`INVALID_ARGUMENT`、`NOT_SUPPORTED`、`NOT_FOUND`（仅 `connect_node_async`，见 §5.2a）、`WOULD_DEADLOCK`、`RESOURCE_EXHAUSTED`、`INTERNAL`；其余结果走 `on_done` |
 | `iocomm_conn_send` / `iocomm_endpoint_send` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`、`TOO_LARGE`、`NO_RECEIVER`、`WOULD_BLOCK`、`DISCONNECTED`、`TIMEOUT`、`WOULD_DEADLOCK`、`CLOSED`、`INTERNAL` |
 | `iocomm_conn_send_async` / `iocomm_endpoint_send_async` | 同步返回：`STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`、`TOO_LARGE`、`WOULD_DEADLOCK`、`CLOSED`、`INTERNAL`；其余走 `on_done` |
 | `iocomm_send_cancel` | `STALE_HANDLE`、`NOT_FOUND`（op 已完成）、`INVALID_ARGUMENT`、`INTERNAL` |
@@ -210,6 +212,8 @@ const char* iocomm_strerror(int32_t code);  /* 静态存储期，不要 free */
 | 输入类别 | 非法值时的行为 |
 |---|---|
 | 定宽整数承载的枚举（`driver_mode` / `overflow_policy` / `direction` / `flags` 等） | 返回 `ICOMM_ERR_INVALID_ARGUMENT`，**不静默截断、不取默认值** |
+| **三态开关**（`tcp_nodelay`：0 = 默认/保持、1 = 开、2 = 关；`discovery_config.enable_multicast` 同构） | 非 0/1/2 → `INVALID_ARGUMENT`。**注意 0 不是 1 的同义词**——0 的含义是「用默认/保持」，本库默认值是「开」，因此 0 与 1 生效结果相同但语义不同；tune_config 里 0 = 保持当前（可能是 2 = 关） |
+| `listen_backlog` | `0` = 默认 / 保持；非 0 且 ≥ 1 合法；负数在 `uint16_t` 上不可表示 |
 | `flags` 中的**未定义位** | 同上：`INVALID_ARGUMENT`（未知位无法安全忽略——它可能改变语义） |
 | 数值字段超出范围（如 `max_message_size` 小于帧头） | `INVALID_ARGUMENT` |
 | 0 值 | 按该字段注释的约定（默认 / 保持 / 关闭 / 无截止），**不是错误** |
@@ -249,9 +253,16 @@ typedef struct iocomm_runtime_config {
     uint8_t  driver_mode;          /* ICOMM_DRIVER_* */
     uint8_t  reserved8[7];
 
-    /* 节点身份：0 = 自动（在 state_dir 下持久化） */
+    /* 节点身份（2026-11-04，N-04，见架构 §5.1b）：
+     *  node_id != 0 → 显式配置，原样使用（稳定性由调用方保证）；
+     *  node_id == 0 → 自动：在 state_dir 下原子创建/读取 `<state_dir>/iocomm.nodeid`
+     *    （16 位小写十六进制）。**要求 state_dir 非空且可写**；为空 / 路径不可用 /
+     *    文件内容不合法 → runtime_create 返回 INVALID_ARGUMENT。
+     *  **v1 不做任何主机级派生**（machine-id / MachineGuid / 主机名 / MAC 均不参与）：
+     *  主机级纯函数会让同机多进程得到同一 NodeId（违反「每 Runtime 独立」），
+     *  掺随机盐又会让重启后 NodeId 变化（违反 FR-9.1）。只读文件系统请显式配置 node_id。 */
     uint64_t node_id;
-    const char* state_dir;         /* 自动生成 node_id 的落盘目录；可 NULL */
+    const char* state_dir;         /* 自动 node_id 的落盘目录；node_id == 0 时**不可为 NULL**（见上） */
     uint64_t    state_dir_len;
 
     /* 节点名：展示用，随发现上报（FR-9.4）。NULL 或 len=0 = 不设名，
@@ -329,8 +340,8 @@ typedef struct iocomm_tune_config {
     uint32_t recv_queue_max;
     uint32_t max_message_size;
 
-    uint64_t heartbeat_ms;         /* 0 = 保持当前；默认 2000 ms（见架构 §6.2） */
-    uint64_t heartbeat_miss_limit; /* 连续丢 N 次判死；0 = 保持 */
+    uint64_t heartbeat_ms;         /* 0 = 保持当前；默认 **2000 ms**（架构 §6.2 同一权威值） */
+    uint64_t heartbeat_miss_limit; /* 连续丢 N 次未收到心跳判死；0 = 保持当前；默认 **3** */
 
     uint32_t iface_index;          /* 0 = 保持；否则改为指定网卡 */
     uint8_t  overflow_policy;      /* ICOMM_OVERFLOW_*；0 = 保持；作用于全部端点 */
@@ -339,8 +350,21 @@ typedef struct iocomm_tune_config {
     /* 发现侧参数（0/NULL = 保持） */
     uint64_t discovery_heartbeat_ms;
     uint64_t discovery_lease_ms;
+
+    /* ── 套接字参数（2026-11-04 尾部追加，N-12 / FR-4.8；0 = 保持当前）──
+     * 与 endpoint_config 同义，但 0 表示「保持当前值」（tune 的统一口径），
+     * **不是**「默认开」——端点未显式设置时，tune 的值成为它的生效值。
+     * **生效边界（避免误读）**：
+     *  - `tcp_nodelay`：可对**已建立连接与已监听 socket**立即 `setsockopt`，热更新当场生效；
+     *  - `listen_backlog`：`listen()` 已调用后**无法再改**。tune 值只对**此后新建**的监听 socket
+     *    （端点重建 / 新端点）生效；已监听端点保持创建时的 backlog（与 `max_message_size`
+     *    对已握手连接的冻结属同类「热更新例外」，见 §5.0 规则 5）。 */
+    uint8_t  tcp_nodelay;        /* 0 = 保持；1 = 开；2 = 关；非 0/1/2 → INVALID_ARGUMENT */
+    uint8_t  reserved9[5];       /* 补齐 8 B 尾块（1 + 5 + 2），避免隐式尾填充 */
+    uint16_t listen_backlog;     /* 0 = 保持；否则 ≥ 1 的 backlog（仅对新建监听 socket 生效） */
 } iocomm_tune_config;
 
+/* C99 分部初始化：未列出的成员自动置零 → 两个套接字字段均为 0 = 保持当前值。 */
 #define ICOMM_TUNE_CONFIG_INIT \
   { { sizeof(iocomm_tune_config), ICOMM_ABI_MAJOR, ICOMM_ABI_MINOR, 0, 0, 0 } }
 
@@ -395,6 +419,8 @@ const iocomm_abi_header* iocomm_abi_version(void);
 | `max_handles` | ✅ 仅创建期 | — | ❌ | 不可热更新 |
 | `heartbeat_ms` / `heartbeat_miss_limit` | — | — | ✅ 仅运行期 | 热更新 |
 | `iface_index` | — | ✅ 作用：**端点监听 + 该端点的发送/组播** | ✅ 作用：**全部端点 + 发现** | 见下 |
+| `tcp_nodelay` | — | ✅ `tcp_nodelay`（0 = 默认**开**） | ✅ `tcp_nodelay`（0 = 保持）只改**未被端点级显式设置**的端点 | 端点级 > tune |
+| `listen_backlog` | — | ✅（0 = 默认 **128**） | ✅（0 = 保持）只改**未被端点级显式设置**的端点 | 端点级 > tune |
 | `discovery_heartbeat_ms` / `discovery_lease_ms` | — | — | ✅ | 热更新（**发现配置的单一权威**） |
 
 **规则**：
@@ -402,6 +428,9 @@ const iocomm_abi_header* iocomm_abi_version(void);
 2. **发现的心跳/租约的生效顺序**：`iocomm_discovery_start` 时以 `discovery_config.heartbeat_ms/lease_ms` 为**初值**；之后 `tune_config.discovery_heartbeat_ms/lease_ms` 覆盖它（0 = 保持）。`discovery_config` 的这两个字段**只在 `discovery_start` 这一刻生效**，不参与运行期的后续覆盖判断。
 3. `tune_config` 中值为 0 表示「保持当前值」；**没有「恢复默认」的语义**（要恢复请重建 Runtime）。
 4. `runtime_config` 中 `driver_mode` / `node_id` / `state_dir` / `node_name` / `log_fn` / `audit_fn` / `max_handles` / `monitor_budget_bytes` 是**创建期参数**，传给 `iocomm_runtime_reconfigure` 不适用（它只收 `iocomm_tune_config`）。
+5. **热更新的作用对象**：`tcp_nodelay` 对已建立连接与已监听 socket 立即生效；`listen_backlog`
+   **只对新建监听 socket 生效**（`listen()` 之后不可改）——与「`max_message_size` 对已握手连接冻结」
+   （架构 §3.2）同属显式例外，理由相同：已生效的参数不可能追溯修改。
 
 ### 5.1 本地端点
 
@@ -409,7 +438,9 @@ const iocomm_abi_header* iocomm_abi_version(void);
 typedef struct iocomm_endpoint_config {
     iocomm_abi_header hdr;
 
-    const char* name;            /* 端点名（可带 '/' 分层），UTF-8 */
+    const char* name;            /* 端点名。格式与长度见 §5.1a：UTF-8 编码后 **1–255 B**、
+                                  * 不得含 NUL、不含空段（`/` 为层级分隔符，不以 `/` 开头/结尾、无 `//`）；
+                                  * 违反任一项 → INVALID_ARGUMENT */
     uint64_t    name_len;
 
     /* 监听地址：NULL = 不监听（仅用于连接远端） */
@@ -418,20 +449,40 @@ typedef struct iocomm_endpoint_config {
     const char* listen_addr;       /* "0.0.0.0:0" / "/run/x.sock" / "\\\\.\\pipe\\x" / inproc 名 */
     uint64_t    listen_addr_len;
 
-    uint32_t flags;              /* ICOMM_ENDPOINT_* */
+    uint32_t flags;              /* v1 **保留字段，无已定义位**；任何非 0 位 → INVALID_ARGUMENT
+                                  * （与 §3.3「flags 中的未定义位」同口径）。原 ICOMM_ENDPOINT_UNIQUE 已删除 */
     uint32_t queue_limit;        /* 0 = 用 runtime 默认；同时作用于该端点的发送与接收队列 */
 
     uint32_t iface_index;        /* 0 = 自动；否则只在该网卡监听/发送 */
     uint8_t  overflow_policy;    /* ICOMM_OVERFLOW_*；0 = 用 runtime 默认 */
     uint8_t  publish_local;      /* 1 = 同时发布到本机注册表（FR-2.6） */
     uint8_t  reserved8[2];
+
+    /* ── 套接字参数（2026-11-04 尾部追加，N-12 / FR-4.8）──
+     * 语义按传输：tcp 上两者均生效；unix 上仅 `listen_backlog` 有意义（`TCP_NODELAY` 忽略）；
+     * 其余传输（pipe / inproc）上两者均忽略、不报错。 */
+    uint8_t  tcp_nodelay;        /* 0 = 用默认（**开**，不是「关」）；1 = 明确开；2 = 明确关；
+                                  * 非 0/1/2 → INVALID_ARGUMENT。默认开的理由：工业 IO 是小消息低延迟，
+                                  * Nagle 会引入数十毫秒。0 与其它字段一样表「默认」，而本字段的默认值是开 */
+    uint8_t  reserved9[5];       /* 补齐 8 B 尾块（1 + 5 + 2），避免隐式尾填充 */
+    uint16_t listen_backlog;     /* 0 = 默认 **128**；否则为该监听 socket 的 backlog。
+                                  * backlog 溢出表现为连接被拒（对端 connect 超时/被拒），本端无计数可观测 */
 } iocomm_endpoint_config;
 
+/* C99 分部初始化：未列出的成员自动置零
+ * → tcp_nodelay = 0（默认开）、listen_backlog = 0（默认 128）。 */
 #define ICOMM_ENDPOINT_CONFIG_INIT \
   { { sizeof(iocomm_endpoint_config), ICOMM_ABI_MAJOR, ICOMM_ABI_MINOR, 0, 0, 0 } }
 
-#define ICOMM_ENDPOINT_UNIQUE  0x0001u  /* 单实例排他 */
-/* （原 ICOMM_ENDPOINT_SECRET 已移除：监控改为独立的 iocomm_monitor_*，见 §9） */
+/* **端点级套接字参数的非目标（2026-11-04，N-12）**：v1 **不暴露**内核 TCP keepalive 开关
+ * （`SO_KEEPALIVE` / `TCP_KEEPIDLE` / `SIO_KEEPALIVE_VALS`）。半开检测由**应用层心跳**承担
+ * （FR-5.3，默认 2000 ms × 3）：内核 keepalive 默认 2 小时，且 WS2016 缺 `TCP_KEEPIDLE`，
+ * 把它做成配置项只会给调用方一个「以为是快速检测」的假旋钮。需要内核级保活时不在本库范围：
+ * 本库不向调用方暴露 fd，无法逐连接设置。 */
+
+/* （原 ICOMM_ENDPOINT_UNIQUE 已移除：跨进程同名一律 CONFLICT，同进程同名 ALREADY_EXISTS，
+ *   见架构 §6.4 与 FR-1.4；不再有「可多实例 + 自动改名」的开关。
+ *   原 ICOMM_ENDPOINT_SECRET 已移除：监控改为独立的 iocomm_monitor_*，见 §9） */
 
 int32_t iocomm_endpoint_create(iocomm_runtime_t rt,
                                const iocomm_endpoint_config* cfg,
@@ -479,7 +530,8 @@ uint32_t iocomm_endpoint_count(iocomm_runtime_t rt);
 int32_t  iocomm_endpoint_get  (iocomm_runtime_t rt, uint32_t index,
                                iocomm_endpoint_t* out_ep, iocomm_error* err);
 
-/* 唯一性三态（FR-1.5）：区分「空闲 / 本进程持有 / 他进程持有」 */
+/* 唯一性三态（FR-1.5）：区分「空闲 / 本进程持有 / 他进程持有」。
+ * **仅用于注册前探测与诊断**——`create()` 的返回值才是权威（架构 §6.4）。 */
 typedef enum iocomm_name_state {
     ICOMM_NAME_FREE           = 0,
     ICOMM_NAME_HELD_BY_SELF   = 1,
@@ -495,11 +547,39 @@ int32_t iocomm_endpoint_name_state(iocomm_runtime_t rt,
                                    iocomm_error* err);
 
 /* 查询本端点实际监听的地址（端口 0 时用于取回系统分配的端口）。
- * inproc 端点返回它的进程内名字。 */
+ * inproc 端点返回它的进程内名字。
+ *
+ * **返回的是「原始监听值」，不是发现表里的「通告值」**（2026-11-04，N-05 口径统一）：
+ *  - 通配地址原样保留（`0.0.0.0:<实际端口>`）；端口 0 替换为实际分配端口；
+ *  - 发现表 `endpoint_info.addr` 上报的是**可拨号通告值**（通配地址已替换为具体地址，见 FR-8.12 与 §5.2a「地址解析」）。
+ * 两者用途不同：排障/自检用本函数，`connect_node` 用通告值。 */
 int32_t iocomm_endpoint_local_addr(iocomm_runtime_t rt, iocomm_endpoint_t ep,
                                    char* buf, uint64_t buf_len,
                                    uint64_t* out_len, iocomm_error* err);
 ```
+
+### 5.1a 端点名格式与长度上限（2026-11-04 定，N-17）
+
+`endpoint_config.name` 是**远端可寻址的身份**（`connect_node` 按 `name` 精确匹配，§5.2a），
+也是发现报文 `ENDPOINTS` 的条目内容（[线格式 §8](wire-format.md)）。因此必须给死上限：
+
+| 规则 | 判定 |
+|---|---|
+| 长度 | **1–255 字节**（`name_len` 计**UTF-8 编码后的字节数**，不是字符数）。`name_len == 0` 或 > 255 → `INVALID_ARGUMENT` |
+| NUL 字节 | **不得包含**（`name_len` 范围内出现 `0x00` → `INVALID_ARGUMENT`）。调用方用 `name_len` 定界，库不依赖 `name` 的 NUL 结尾 |
+| 层级分隔符 | `/` 供 v2 的层级过滤（ADR-002）预留；**不允许空段**——不得以 `/` 开头或结尾、不得出现 `//` → 否则 `INVALID_ARGUMENT` |
+| 编码 | 必须是**合法 UTF-8**（过长编码 / 代理项等非法序列 → 拒绝）→ 否则 `INVALID_ARGUMENT` |
+| 大小写 / 规范化 | **不做**：名字按**字节**比较，不做 Unicode NFC/NFD 归一化、不做大小写折叠。由调用方保证一致 |
+
+**为什么是 255 B**：
+
+- 发现线格式 `ENDPOINTS` 的条目用 `name_len(u16)` 编码（[线格式 §8](wire-format.md)），`u16` 上限 65535 远大于 255；255 B 让 `name_len` 永不逼近 `u16` 上限。
+- 发现报文单包 ≤ **1400 B**、按条目边界分页（[线格式 §8.1](wire-format.md)）。255 B 的名字 + 传输名（≤ 8 B）+ 可拨号地址（IPv6 字面量 ≤ 45 B；unix socket 路径与 Windows 管道名通常更短，若超长则由 §8.1「单条条目超限不发送」的既有降级路径处理）组成的**单条端点条目远小于 1400 B**，不会触发「单条条目超限 → 不发送并计入 `stats.discovery_oversize`」的降级路径。
+- 与 `inproc` 的 `listen_addr`（≤ 255 B，§5.1b）取同一上限，避免调用方在两套命名空间间来回换算。
+
+> **适用范围**：本节的字节规则同时适用于 `iocomm_connect_node*` 的 `endpoint_name` 参数与
+> `iocomm_endpoint_lookup` / `iocomm_endpoint_name_state` 的 `name` 参数（它们引用同一个名字空间）。
+> 查询类函数收到不合规名字时同样返回 `INVALID_ARGUMENT`（而不是 `NOT_FOUND`）——格式错误与「查无此名」是两类事。
 
 ### 5.1b inproc 传输（进程内）
 
@@ -582,7 +662,10 @@ int32_t iocomm_endpoint_accept(iocomm_runtime_t rt, iocomm_endpoint_t ep,
  * 因此不存在「返回了但不能用」的半可用连接。
  * ep_owner 指定该连接归属哪个本地端点（用于 endpoint_send 扇出与
  * iocomm_conn_count 过滤）；传 0 表示不属于任何端点（只能点对点使用）。
- * **入站连接不需要（也无法）指定 ep_owner**：被持有后自动归属监听它的端点，见 §5.2 成员资格。 */
+ * **入站连接不需要（也无法）指定 ep_owner**：被持有后自动归属监听它的端点，见 §5.2 成员资格。
+ * **自动重连（2026-11-04，N-06，见架构 §5.2c）**：断开后库按退避重连，**复用同一 `iocomm_conn_t` 句柄**；
+ * 断开时在途未发项逐条 `DROPPED(PEER_GONE)`（异步 `on_done(DISCONNECTED)`），**重连不重放**；
+ * `sequence` 随新连接从 1 重置；已登记的订阅保持，`peer_node_id` 以新握手结果更新。 */
 int32_t iocomm_connect(iocomm_runtime_t rt, iocomm_endpoint_t ep_owner,
                        const char* transport, uint64_t transport_len,
                        const char* addr, uint64_t addr_len,
@@ -621,7 +704,37 @@ int32_t iocomm_connect_node_async(iocomm_runtime_t rt,
                                   void (*on_done)(void* user, int32_t code,
                                                   iocomm_conn_t conn),
                                   void* user, iocomm_error* err);
+```
 
+#### 5.2a `connect_node` 的地址解析规则（2026-11-04 定，N-05）
+
+`iocomm_connect_node*` 只收 `node_id` + 端点名，**不直接接收地址**。由库完成「发现结果 → 可拨号地址」的解析：
+
+| 步骤 | 规则 |
+|---|---|
+| **0** | **先按 [§5.1a](#51a-端点名格式与长度上限2026-11-04-定n-17) 校验 `endpoint_name`**（1–255 B、合法 UTF-8、无 NUL、`/` 层级无空段）。不合规 → `INVALID_ARGUMENT`，**不进入发现表查找**——格式错误优先于「查无此名」 |
+| 1 | 在 discovery 节点表中按 `node_id` 精确查找 `iocomm_node_info`。找不到（未发现 / 已 `LEFT`）→ `NOT_FOUND` |
+| 2 | 在该节点的 `endpoints` 数组中按 `name` **精确字节匹配**（区分大小写；不含层级前缀匹配）找成员。没有同名成员 → `NOT_FOUND` |
+| 3 | 取该 `iocomm_endpoint_info` 的 `transport` + `addr` 作为拨号目标，等价于调用 `iocomm_connect(ep_owner, transport, addr, …)` |
+| 4 | `transport` 是本端未实现的传输（如 v2 对端上报 `"udp"` 而本端为 v1）→ `NOT_SUPPORTED` |
+| 5 | 发现条目里的 `addr` **必须是通告值**（见下），库不得在此处再做通配地址替换——替换发生在**发送发现报文的一端**，接收端只使用 |
+
+**`addr` 的语义（唯一口径）**：
+
+- **`iocomm_endpoint_info.addr` = 通告值（可拨号）**，**不是**原始监听值。
+  发布端点能力时：若 `listen_addr` 的地址是通配地址（`0.0.0.0` / `[::]`），替换为本端在该报文出口网卡上的具体地址；
+  若端口为 0，替换为实际监听端口。组播信标的出口地址取决于 `iface_index`；因此**同一端点在不同网卡上可能通告不同地址**——以最近一次收到的报文为准。
+- **`iocomm_endpoint_local_addr()` = 原始监听值**（通配地址原样保留，端口 0 换成实际端口），供本端排障使用。
+- 理由：接收端不知道发送端的监听网卡，只有发送端知道「哪些地址能拨通自己」。在接收端做替换需要猜测源地址并额外记录「信标源 IP」，而 `ENDPOINTS` 是多端点共享一个源地址——发送端替换更简单且唯一。
+
+**失败码汇总**（与 §3.2.1 的 `iocomm_connect_node` 行一致）：节点不存在 / 成员不存在 → `NOT_FOUND`；
+transport 不支持 → `NOT_SUPPORTED`；其余同 `iocomm_connect`（`INVALID_ARGUMENT` / `TIMEOUT` / `DISCONNECTED` / `NO_RECEIVER` / `WOULD_DEADLOCK` / `RESOURCE_EXHAUSTED` / `INTERNAL`）。
+
+> **异步版的一致性**：`iocomm_connect_node_async` 的同步返回只报「参数/句柄/资源」类错误；
+> `NOT_FOUND` / `NOT_SUPPORTED` 若在**查找阶段**就能判定，走同步返回（不入队）；一旦开始拨号，
+> 后续结果（`TIMEOUT` / `DISCONNECTED`）走 `on_done`。
+
+```c
 /* 接管一条连接但**不安排任何收发**（拉取模式）。
  * 这是**单条连接层面**唯一的显式持有动作（subscribe 是推送侧的等价持有；
  * 端点级 `iocomm_subscribe(ep)` / `endpoint_recv(ep)` 是无须逐连接调用的等价持有，见 §5.2）：
@@ -955,7 +1068,8 @@ typedef struct iocomm_message {
 
     iocomm_conn_t from;          /* **来源连接**（可用来回复） */
     uint64_t source_node;        /* 来源 NodeId */
-    uint64_t sequence;           /* per-source 单调序号 */
+    uint64_t sequence;           /* **每来源连接**的单调序号（不是 node 级全局序号）；重连后新连接从 1 重计，
+                                  * 断开前后不可比——跨重连顺序靠 `correlation_id`（N-06，架构 §5.2c） */
     uint64_t timestamp_ns;       /* 发送方事件时间 */
     uint64_t correlation_id;     /* 0 = 无 */
 
@@ -1095,7 +1209,8 @@ typedef struct iocomm_endpoint_info {
     uint64_t    name_len;
     const char* transport;     /* **静态存储期** */
     uint64_t    transport_len;
-    const char* addr;          /* **静态存储期** */
+    const char* addr;          /* **静态存储期**；**通告值（可拨号）**，不是原始监听值——
+                                * 通配地址 / 端口 0 已由发送端替换，见 §5.2a 与 FR-8.12 */
     uint64_t    addr_len;
 } iocomm_endpoint_info;
 
@@ -1170,7 +1285,9 @@ struct iocomm_peer_status {
     uint32_t reserved0;
 
     uint64_t peer_node_id;
-    /* 条件集（FR-5.1）：值为 iocomm_condition_status */
+    /* 条件集（FR-5.1）：值为 iocomm_condition_status。
+     * 自动重连期间（N-06）：句柄不变，`connected` = FALSE（确知未连通）→ 重连成功后 TRUE；
+     * `lively` / `healthy` 在重连后的心跳窗口未满前为 UNKNOWN。AC-105 观测该序列。 */
     uint8_t connected;
     uint8_t lively;
     uint8_t healthy;             /* 最近一个判定窗口内无重连 / 无协议错误；见架构 §5.2b */
@@ -1461,6 +1578,8 @@ typedef struct iocomm_monitor_config {
 > - 入队**前**已知连接已断开 → 入队失败，返回 `DISCONNECTED`，产生 `DROPPED(PEER_GONE)`；
 > - 消息已**入队**（已产生 `SENT`）后连接断开 → 队列清空，逐条产生 `DROPPED(PEER_GONE)`，
 >   异步的 `on_done(code = ICOMM_ERR_DISCONNECTED)`。
+> **自动重连不改变这两条**（2026-11-04，N-06）：断开即结算，重连成功后**不重放**；重连窗口内的新发送
+> 走「入队前已断开」形态（见架构 §5.2c）。
 >
 > 已产生 `SENT` 的消息，其后续结局是 `DROPPED(TIMEOUT / PEER_GONE)`、`DELIVERED` 或取消——
 > **`SENT` 之后出现 `DROPPED` 是正常序列**（SENT = 已入队，不是「已送达」）。
@@ -1697,6 +1816,20 @@ struct iocomm_audit_record {
 > `runtime_config` 追加 `node_name` / `node_name_len`；新增 `iocomm_runtime_node_id()` / `iocomm_runtime_node_name()`；
 > `listen_transport` 文档化 `"inproc"`；删除 `discovery_config.registry_plugin`。理由与上一段相同——尚无需要兼容的宿主，
 > 升 minor 会把「发布前定型」误报成「向老宿主向后兼容」。
+
+> **发布前的同批调整（2026-11-04，同样不升 `abi_minor`）**：**N-12 套接字参数**——
+> `endpoint_config` 尾部追加 `tcp_nodelay`（`uint8_t`，0 = 默认**开**）/ `reserved9` / `listen_backlog`（`uint16_t`，0 = 默认 128）；
+> `tune_config` 尾部追加同名字段（0 = 保持）。二者均**只做尾部追加**，按本文件「尾部追加字段 → `minor + 1`」的
+> **发布后**规则应升 minor；但这批改动与 2026-10-21 同属**发布前定型**（尚无可兼容宿主，见上式），故
+> **不升 `abi_minor`**，与既有 `send_options.queue_timeout_ms` 等保持同一口径。首次发布后任何此类追加一律升 minor。
+> 同批仅改注释/文档、不动布局的：N-04（`node_id` / `state_dir` 语义）、N-05（`connect_node` 解析规则）、
+> N-06（重连语义）、N-07（心跳默认值）。
+
+> **发布前的宏删除（2026-11-04，同样不升 `abi_minor`）**：删除 `ICOMM_ENDPOINT_UNIQUE`——它是**宏**，
+> 不进入任何结构体布局；`endpoint_config.flags` 改为 v1 保留字段（无已定义位，非 0 → `INVALID_ARGUMENT`）。
+> 与上面的理由相同：尚无兼容宿主，发布前删除宏不是对外 ABI 变更；且该标志对应的「可多实例 + 自动改名」
+> 语义已被 [架构 §6.4](architecture.md) 与 FR-1.4 废止（跨进程同名一律 `CONFLICT`）。
+> 同批的端点名格式/长度约束（N-17，§5.1a）属**输入校验口径**，不改结构体布局，也不升 minor。
 
 > **发布前的枚举值调整**：同理，**首次发布前**枚举成员可整体重编号（2026-10-21：撤销 `ICOMM_DROP_FILTERED`
 > 后 `iocomm_drop_reason` 由 1–7 紧凑为 1–6，并补哨兵 `ICOMM_DROP_NONE = 0`）。

@@ -150,7 +150,7 @@ readelf --version-info libiocomm.so | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail 
 | 对端关闭 | `read()==0` | `ReadFile` 返回 0 / `ERROR_BROKEN_PIPE` |
 | 非阻塞建连 | `EINPROGRESS` | overlapped + `ConnectEx` |
 | 写已关闭对端 | `SIGPIPE`（默认杀进程！） | 无挂起信号 |
-| 半开检测 | `TCP_USER_TIMEOUT` / keepalive | 仅 keepalive + 应用层心跳 |
+| 半开检测 | 应用层心跳（不依赖内核 keepalive；见 FR-5.3 / 架构 §6.2） | 应用层心跳（WS2016 缺 `TCP_KEEPIDLE`，内核 keepalive 默认 2 h，不可用） |
 | 端口复用 | `SO_REUSEPORT` | 不可用 |
 | 事件机制 | epoll | IOCP |
 

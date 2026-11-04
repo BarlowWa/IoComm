@@ -71,12 +71,13 @@ iocomm_runtime_start(rt, &err);
 iocomm_endpoint_t ep = 0;
 iocomm_endpoint_config ep_cfg = ICOMM_ENDPOINT_CONFIG_INIT;
 ep_cfg.name                 = "plant3/line2/temp";
-ep_cfg.name_len             = 17;
+ep_cfg.name_len             = 17;            /* 名字 UTF-8 1–255 B，'/'-分层不得空段（c-abi §5.1a） */
 ep_cfg.listen_transport     = "tcp";
 ep_cfg.listen_transport_len = 3;
 ep_cfg.listen_addr          = "0.0.0.0:0";   /* 0 = 系统分配 */
 ep_cfg.listen_addr_len      = 9;
 if (iocomm_endpoint_create(rt, &ep_cfg, &ep, &err) != ICOMM_OK) { /* ... */ }
+/*    同进程重名 → ALREADY_EXISTS；他进程已持有同名 → CONFLICT（均不注册，不自动改名） */
 
 /* 3. 接收入站连接（服务端角色） */
 iocomm_subscription_t accept_sub = 0;
