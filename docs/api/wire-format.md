@@ -67,10 +67,10 @@ payload 固定 6 B：`reason(u16)` + `reserved(u16)` + `detail(u32)`。
   | reason | 由谁发 | 同时产生的本地结果 |
   |---|---|---|
   | `FRAME_TOO_LARGE` | 接收方：入站整帧 > `max_frame_bytes` —— **发 ERROR**（能读到完整 20 B 头就已知道超限，且对端懂 ERROR） | `DROPPED(TOO_LARGE)` + 计数 |
-  | `HANDSHAKE_TIMEOUT` | 双方各自计时，先到者发 | 该连接在途 `on_done(DISCONNECTED)` |
-  | `VERSION_UNSUPPORTED` | 收到不兼容 `HELLO` 的一方 | 同上 |
-  | `MALFORMED` | 接收方：magic / 长度 / TLV 校验失败 | 同上 |
-  | `PROTOCOL_STATE` | 接收方：**握手后**再收到 `HELLO`（重复握手）；`HELLO_ACK` **不算**——它可随时到达，收到后忽略 | 同上 |
+  | `HANDSHAKE_TIMEOUT` | 双方各自计时，先到者发 | 入站：不触发 `accept`；出站：`connect` 返回 `ICOMM_ERR_TIMEOUT`，`connect_async` 的 `on_done(ICOMM_ERR_TIMEOUT)`（**建连阶段**口径见 C ABI §5.2；它与下方「接收方的观测面」中的 `on_done(DISCONNECTED)` 不冲突——后者只描述**已建立连接**被协议错误终止） |
+  | `VERSION_UNSUPPORTED` | 收到不兼容 `HELLO` 的一方 | 入站：不触发 `accept`；出站：`connect` 返回 `ICOMM_ERR_DISCONNECTED`，`connect_async` 的 `on_done(ICOMM_ERR_DISCONNECTED)` |
+  | `MALFORMED` | 接收方：magic / 长度 / TLV 校验失败 | 建连阶段同上（`DISCONNECTED`）；**已建立连接**上的畸形帧按下方「接收方的观测面」 |
+  | `PROTOCOL_STATE` | 接收方：**握手后**再收到 `HELLO`（重复握手）；`HELLO_ACK` **不算**——它可随时到达，收到后忽略 | **只发生在已建立连接上**：按下方「接收方的观测面」处理（在途 `on_done(DISCONNECTED)`） |
 - **收到 `ERROR` 之后**：本端进入「终止中」，**不再处理任何后续帧**（同批 TCP 读到的 `DATA` 直接忽略），
   也不回发第二个 `ERROR`。连接按上一条关闭。
 - **接收方的观测面（唯一口径）**：收到 `ERROR` 属于**异步事件**，不挂在任何一次调用上。
@@ -175,6 +175,22 @@ payload 固定 6 B：`reason(u16)` + `reserved(u16)` + `detail(u32)`。
    这样的调用参数，用参数派生会让一半连接无值可依）内未完成双向 `HELLO`
    → 发 `ERROR(HANDSHAKE_TIMEOUT)` 后关闭。
 6. 连接上限只在握手时计算一次（见上方「接收尺寸协商」）；之后热改 `max_message_size` 不改变它。
+7. **交付时点（2026-11-03，N-03）**：**入站连接在双向 `HELLO` 完成后才交付应用**——即 `iocomm_endpoint_accept`
+   注册的回调在此刻触发（C ABI §5.2）。因此 accept 回调内用 `ICOMM_SEND_CLOSE_AFTER` 发出的首条 `DATA`
+   一定落在本规则 3 的「可发 DATA」之后，不会被对端按「未握手 DATA」断链；`iocomm_peer_info.peer_node_id`
+   取对端 `HELLO` 里的 `node_id`，**必有真实值**。握手期的连接是库的**内部会话占位**：不分配
+   `iocomm_conn_t` 句柄、不占 `max_handles`、对应用不可见。
+   **握手失败路径不产生 accept 回调**：版本不兼容 / 超时 / 畸形（规则 2、5 与 §2.1）时，连接在内部被关闭，
+   只产生 `log_fn` 记录。**`protocol_errors` 的口径**与 §2.1 完全一致（「收到 `ERROR` 或判定帧损坏」）：
+   本端**判定帧损坏**（magic / 长度 / TLV 校验失败，即 `MALFORMED`）**计入**；**超时 / 版本不兼容**无帧损坏，
+   **不计入**。**没有任何 accept 回调**。
+   这是唯一时点：不存在「TCP 建立即交付」的变体。
+
+   > **为什么不在 TCP 建立时交付**：那样应用会拿到一条尚不能发 `DATA` 的连接，`accept` 内的
+   > 「发一条拒绝就走」要么被静默缓冲到握手后（应用无法区分「已发」与「在缓冲」），要么被对端断链；
+   > 且 `peer_node_id` 只能填 0，回调的准入过滤价值（本就没有接受/拒绝返回值）也不成立。
+   > 代价是握手期占用一个内部会话（不占句柄名额），以及握手超时前应用看不到该连接——后者正是想要的：
+   > 应用只会被通知「可用的连接」。
 
 > 没有 `HELLO` 就无从知道对端版本——「未知 tag 跳过」只能处理**同一 major 内**的追加。
 > 提前握手把「版本不匹配」变成一条明确的 `DISCONNECTED`，而不是解析到一半才发现。
@@ -221,6 +237,12 @@ payload 固定 6 B：`reason(u16)` + `reserved(u16)` + `detail(u32)`。
 - **尺寸校验仍生效**：inproc 两端直接比较各自的 `max_message_size`（不协商），
   若本端大于对端，超出对端上限的消息在**本端发送时**已通过校验、在**对端入站时**被判 `TOO_LARGE` 并关闭连接。
   这是 inproc 与 TCP 的唯一行为差异（TCP 有 §5 的协商可避免），属已知瑕疵，v1 不做额外协商。
+- **accept 交付时点 = 连接建立即交付**（显式定义，不是 §5 规则 7 的特例漏洞）：inproc 没有握手，
+  「建立即可用」——没有可发 DATA 之前的窗口。因此 `iocomm_endpoint_accept` 回调在连接建立后触发，
+  回调内 `conn_send_async(CLOSE_AFTER)` 合法。
+- **inproc 的 `peer_node_id` 来源**：两端在同一地址空间，库直接读取对端 Runtime 的 `node_id`（即
+  `iocomm_runtime_node_id()` 的返回值），因此**恒为真实值**。`iocomm_peer_info.peer_node_id == 0`
+  只可能出现在「对端 Runtime 在交付前已被销毁」的竞态里——正常路径不会为 0。
 
 > 这也是为什么 `wire-format.md` 与 ABI 版本是两套编号（§6 末尾）：inproc 可以完全不产生线格式。
 

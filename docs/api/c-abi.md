@@ -302,8 +302,9 @@ int32_t iocomm_runtime_create(const iocomm_runtime_config* cfg,
  *
  * - `start` / `stop` 均**幂等**（重复调用返回 `ICOMM_OK`）。
  * - manual 模式下 `start` 只做状态迁移，**不启动线程**；loop 由 `run_once` 驱动。
- * - manual 模式下 loop 从未被驱动时，同步 `connect` / `send` 会等满 `timeout_ms` 后返回
- *   `ICOMM_ERR_TIMEOUT`（它们等的是 loop 推进，不是对端）。
+ * - manual 模式下 loop 从未被驱动时，同步 `connect` / `send` 会等满各自的超时后返回
+ *   `ICOMM_ERR_TIMEOUT`（它们等的是 loop 推进，不是对端）。`connect` 的超时口径见 §5.2：
+ *   `connect_timeout_ms` 管 TCP 建立，握手段固定 5000 ms 窗口。
  * - `destroy` 在任意状态可用；销毁后所有句柄失效。 */
 
 /* ── 控制面 ── */
@@ -443,6 +444,7 @@ int32_t iocomm_endpoint_create(iocomm_runtime_t rt,
  *  2. **入站连接**（本端点的**成员连接**）：全部以 FIN 优雅关闭（不是 RST）；这些连接上的订阅失效，
  *     **接收队列**中未取走的消息直接丢弃（**不产生 `DROPPED` 记录**——它们在入站时已记过
  *     `RECEIVED`，且销毁端点不是「丢弃事件」）。正在执行的 `accept` 回调会先跑完，之后不再触发。
+ *     仍在**握手期**（尚未交付、因而尚无 `accept` 回调）的入站会话一并以 FIN 关闭，不产生回调。
  *  3. **出站连接**（`ep_owner == ep` 的连接）：**转为独立队列后继续存活**。销毁时把它们的未发项
  *     迁入各自的连接队列（容量取 runtime 默认），之后照常发出；它们不再计入本端点扇出与
  *     `conn_count(ep)`。要一并关闭请先 `conn_destroy`。
@@ -524,6 +526,18 @@ int32_t iocomm_endpoint_local_addr(iocomm_runtime_t rt, iocomm_endpoint_t ep,
 ```c
 /* 入站连接回调。在 loop 线程上调用。
  *
+ * **交付时点（唯一口径，2026-11-03 N-03）：双向 HELLO 完成后才触发本回调**（tcp / unix / pipe）。
+ *   因此：
+ *   - peer->peer_node_id 必有真实值（HELLO 携带的对端 node_id），不会为 0；
+ *   - 回调内用 conn_send_async(CLOSE_AFTER) 发出的首条 DATA 一定落在双方「可发 DATA」之后，
+ *     不会被对端按「未握手 DATA」断链；
+ *   - 握手期的连接是库的**内部会话占位**：不分配 iocomm_conn_t 句柄、不占 max_handles 名额、
+ *     对应用完全不可见（conn_count / conn_get / 扇出都看不到它）；
+ *   - 握手失败 / 超时 / 版本不兼容时**不产生 accept 回调**（只产生 log_fn 记录；收到对端
+ *     ERROR 时另按 §2.1 计入 stats.protocol_errors）。
+ *   inproc **不跑 HELLO**，交付时点 = 连接建立即交付；peer_node_id 取对端 Runtime 的 node_id
+ *   （同地址空间直接读取，仅在对端 Runtime 已销毁的竞态下为 0）。详见 [线格式 §5 / §7](wire-format.md)。
+ *
  * **inbound 是借用句柄，只在本次回调期间有效**（借用语义，见 ADR-002）：
  *   - 什么都不做              → 回调返回时库自动收回并以 FIN 优雅关闭（= 拒绝）
  *   - iocomm_conn_subscribe   → **隐式持有**（订阅即所有权），连接保持打开
@@ -535,7 +549,8 @@ int32_t iocomm_endpoint_local_addr(iocomm_runtime_t rt, iocomm_endpoint_t ep,
  *   - iocomm_conn_destroy     → 立即关闭（= 显式拒绝），重复调用返回 STALE_HANDLE
  *
  * **端点级持有**（2026-11-03，N-02）：该端点上已启用 `iocomm_subscribe(ep)` 或
- * `endpoint_recv(ep)` 时，入站连接在交付前即由**端点隐式持有**，回调内无需再调任何持有动作；
+ * `endpoint_recv(ep)` 时，端点在**交付的同一时刻**接管入站连接（交付前它是库的内部会话，
+ * 无句柄、不计入扇出与 `conn_count(ep)`——见下方交付时点），回调内无需再调任何持有动作；
  * 此时回调仍会触发（用于观测新连接），但回调内对该连接调 `conn_subscribe` 返回
  * `INVALID_STATE`（已由端点持有），`conn_retain` 幂等返回 `OK`。
  *
@@ -544,7 +559,7 @@ int32_t iocomm_endpoint_local_addr(iocomm_runtime_t rt, iocomm_endpoint_t ep,
 typedef struct iocomm_peer_info {
     uint32_t size;                 /* 库填写实际 sizeof；调用方读取 */
     uint32_t reserved0;
-    uint64_t peer_node_id;         /* 0 = 未知 */
+    uint64_t peer_node_id;         /* tcp/unix/pipe：必有真实值（HELLO 后交付）；inproc：见 §5.2；仅竞态下为 0 = 未知 */
     iocomm_slice address;          /* 对端地址文本，回调期间有效 */
 } iocomm_peer_info;
 
@@ -558,6 +573,13 @@ int32_t iocomm_endpoint_accept(iocomm_runtime_t rt, iocomm_endpoint_t ep,
                                iocomm_error* err);
 
 /* 出站连接（同步）：阻塞调用者线程；loop 线程上返回 WOULD_DEADLOCK。
+ * **返回时点与入站交付对称（2026-11-03，N-03）**：成功返回时**双向 HELLO 已完成**——
+ * `out_conn` 立即可收可发（含首条 DATA），`peer_node_id` 必有真实值。**超时口径（唯一）——两段相加**：
+ * TCP 建立段最多 `connect_timeout_ms`，握手段固定 5000 ms
+ * （线格式 §5 规则 5），**总等待上限 = `connect_timeout_ms + 5000`**。因此调用方设的短超时
+ * 只会缩短 TCP 段，**不会**掐断一个可能成功的握手。任一段超时 → 返回 `ICOMM_ERR_TIMEOUT`；
+ * 握手失败 / 版本不兼容 → `ICOMM_ERR_DISCONNECTED`。
+ * 因此不存在「返回了但不能用」的半可用连接。
  * ep_owner 指定该连接归属哪个本地端点（用于 endpoint_send 扇出与
  * iocomm_conn_count 过滤）；传 0 表示不属于任何端点（只能点对点使用）。
  * **入站连接不需要（也无法）指定 ep_owner**：被持有后自动归属监听它的端点，见 §5.2 成员资格。 */
@@ -568,8 +590,12 @@ int32_t iocomm_connect(iocomm_runtime_t rt, iocomm_endpoint_t ep_owner,
                        iocomm_conn_t* out_conn, iocomm_error* err);
 
 /* 出站连接（异步）：**manual 模式的唯一建连路径**。
- * 立即返回；连接建立、失败、超时、或 Runtime stop/destroy 时，
- * on_done **恰好触发一次**（销毁路径下 code = ICOMM_ERR_CANCELLED）。
+ * 立即返回；连接建立（**双向 HELLO 完成后**，与同步版同口径）、失败、超时、或 Runtime
+ * stop/destroy 时，on_done **恰好触发一次**（销毁路径下 code = ICOMM_ERR_CANCELLED）。
+ * `on_done(OK)` 时交付的 conn 立即可收可发，`peer_node_id` 必有真实值。
+ * **超时码以 on_done 为载体**：超时走 `on_done(ICOMM_ERR_TIMEOUT)`，版本不兼容/畸形走
+ * `on_done(ICOMM_ERR_DISCONNECTED)`——**不是** [线格式 §2.1](wire-format.md)「接收方的观测面」中的 `on_done(DISCONNECTED)`：
+ * 那一条描述的是**已建立连接**上的在途发送被协议错误终止，不覆盖建连阶段。
  * 成功时 out_conn 有效；其余情况为 0，库内已回收所有资源。 */
 int32_t iocomm_connect_async(iocomm_runtime_t rt, iocomm_endpoint_t ep_owner,
                              const char* transport, uint64_t transport_len,
@@ -685,10 +711,13 @@ int32_t  iocomm_conn_get  (iocomm_runtime_t rt, iocomm_endpoint_t ep,
 | `iocomm_endpoint_t`（本地监听端点） | **扇出**：发给该端点的全部**成员连接**（它的全部入站连接 + `ep_owner == ep` 的出站连接）；没有成员连接时返回 `NO_RECEIVER` |
 
 > **入站连接的所有权：借用语义**（完整理由见 [ADR-002](../adr/ADR-002-message-addressing-and-ownership.md)）。
+> **交付时点**：本借用的起点是「双向 HELLO 完成」，不是「TCP 建立」——握手期的连接由库内部持有，
+> 无 `iocomm_conn_t` 句柄、不占 `max_handles`、对应用不可见（见上方 `iocomm_accept_fn` 注释与 [线格式 §5](wire-format.md)）。
+> 这与借用语义自洽：回调返回即收回的是**已经完成握手、可以正常收发的连接**，不存在「借出一个还不能用的连接」的窗口。
 > `accept` 回调拿到的 `inbound` **只在回调期间有效**；回调返回时若库没有观测到任何持有动作，
 > 连接被自动收回并以 FIN 优雅关闭。持有动作有**三种**：**显式 `conn_retain`**、**隐式
 > `conn_subscribe`**、以及**端点级持有**——该监听端点已注册 `iocomm_subscribe(ep)` 或
-> `endpoint_recv(ep)` 时，它接入的入站连接在 accept 时即由端点隐式持有（见 §6.4）。
+> `endpoint_recv(ep)` 时，端点在**交付的同一时刻**接管它接入的入站连接（交付前是库的内部会话，见下方交付时点；机制见 §6.4）。
 > `conn_send_async` 不是所有权开关——「发一条拒绝就走」用
 > `send_options.flags = ICOMM_SEND_CLOSE_AFTER` 表达；不带 `CLOSE_AFTER` 的 `send_async`
 > 若同时未持有，返回 `INVALID_STATE`，强制在回调内表态。
@@ -712,13 +741,14 @@ int32_t  iocomm_conn_get  (iocomm_runtime_t rt, iocomm_endpoint_t ep,
 | `send_queue_max` | **1024** | 条 | 每个端点的发送队列上限 |
 | `recv_queue_max` | **1024** | 条 | 每个端点的接收队列上限 |
 | `max_message_size` | **1 MiB** | 字节 | 见 §9.3；**上限 64 MiB**（超过则单条消息永远进不了队列） |
-| `max_handles` | **4096** | 个 | 本 Runtime 内**六类句柄合计**，**不含 Runtime 自身**；**入站连接占用 conn 名额**（`accept` 分配了 conn 句柄就计入） |
+| `max_handles` | **4096** | 个 | 本 Runtime 内**六类句柄合计**，**不含 Runtime 自身**；**入站连接只在交付时计入**——双向 HELLO 完成后 `accept` 分配 conn 句柄时才占用；**握手期的内部会话占位不分配句柄、不占名额**（§5.2、线格式 §5） |
 
 - 队列上限**同时**受条数与字节约束：条数 ≤ `queue_max`，字节总量 ≤ `min(queue_max × max_message_size, 64 MiB)`。
 - `max_message_size > 64 MiB` → `runtime_create` 返回 `INVALID_ARGUMENT`（否则单条消息永远进不了队列）。
 - **字节上限**：`runtime_config` **不提供独立字段**（避免多一个旋钮）。超过字节上限时按该端点策略处理（与条数满同口径）。
 - 默认值下：条数上限 1024 条，字节上限 64 MiB 每队列。最坏情况（消息都是 1 MiB）是 **64 条即满**，而不是 1024 条。
 - 句柄超限：`endpoint_create` / `connect*` / `subscribe` / `conn_subscribe` / `discovery_snapshot_take` / `monitor_open` 一律返回 `ICOMM_ERR_RESOURCE_EXHAUSTED`。
+- **握手期内部会话的上限（2026-11-03，N-03）**：交付前（双向 HELLO 完成前）的入站会话不占 `max_handles`，但**并非无界**——每端点并发握手会话数 ≤ `max_handles`（**独立计数器**，与六类句柄表互不占用，AC-84 不受影响），超出时**直接关闭新接受的 socket**（不触发 `accept` 回调）。该拒绝是**本地资源保护**，不是协议错误：**不**计入 `stats.protocol_errors`（该计数只统计接收侧收到 `ERROR` / 判定帧损坏），只写 `log_fn` 的 WARN，**不进队列统计**（`queue_dropped` 的定义是队列丢弃，被拒 socket 从未入队）。这是防止 5000 ms 握手窗口内 fd 耗尽的保护，不是配置项。
 - **每个 Runtime 有独立的句柄表与计数**（AC-80 允许多个 Runtime 并存）。
 
 ### 6.1 溢出策略（每端点一个队列）
@@ -731,7 +761,8 @@ int32_t  iocomm_conn_get  (iocomm_runtime_t rt, iocomm_endpoint_t ep,
  *     容量 `send_queue_max` **条**，且字节总量 ≤ **64 MiB**（§6.0）——**发送队列**的占用上界与连接数无关；
  *     接收方向则是「端点一条 + 每连接各一条」，总数随连接数增长（上界 = `(1 + N) × recv_queue_max`）；
  *   - **每个队列项都携带目标连接句柄**（`conn_send` 填该连接；`endpoint_send` 扇出时为 N 个独立项）；
- *   - **入站连接**：在 `accept` 回调内即确定为「拒绝」还是「持有」——拒绝时**不分配**发送队列；
+ *   - **入站连接**：在**交付时点（双向 HELLO 完成）**才可能进入 `accept` 回调，回调内即确定为「拒绝」还是「持有」——
+ *     拒绝时**不分配**发送队列；握手期的内部会话占位从不分配 conn 句柄、不占队列与 `max_handles` 名额。
  *     持有后（`conn_retain` / `conn_subscribe` / 端点级订阅）即成为**监听端点的成员**，
  *     与 `ep_owner == ep` 的出站连接**共用该端点的发送队列**，参与 `endpoint_send` 扇出与 `conn_count(ep)`。
  *     **`CLOSE_AFTER` 不是持有动作**（FR-8.8「发送不是所有权开关」）：它只把连接保持到数据 flush
@@ -937,7 +968,7 @@ typedef struct iocomm_message {
 
 /* 订阅推送。ep 是**本地监听端点**，接收其**全部入站成员连接**的消息。
  * **端点级持有（唯一口径，2026-11-03 N-02）**：在该端点启用本订阅（或 `endpoint_recv(ep)`）后，
- * 该端点接入的入站连接在 accept 时即由端点隐式持有，**不再需要（也不会）在 accept 回调内
+ * 该端点接入的入站连接在**交付的同一时刻**由端点接管，**不再需要（也不会）在 accept 回调内
  * 调 `conn_retain` / `conn_subscribe`**；`accept` 回调本身仍会触发，仅用于观测新连接。
  * 未注册 `endpoint_accept` 时，入站连接同样由本订阅隐式持有并正常投递——
  * 这是「只读端点、不关心单条连接」的服务端主用法。
@@ -965,7 +996,7 @@ int32_t iocomm_unsubscribe(iocomm_runtime_t rt, iocomm_subscription_t sub,
 
 /* 拉取式接收（与 subscribe 二选一，见 §6.4）。
  * 端点级 recv 的隐式持有规则与 `iocomm_subscribe(ep)` 相同（见上）：
- * 启用后，该端点的入站连接在 accept 时即由端点持有，消息进入**端点接收队列**。 */
+ * 启用后，该端点的入站连接在**交付时**由端点接管，消息进入**端点接收队列**。 */
 int32_t iocomm_endpoint_recv(iocomm_runtime_t rt, iocomm_endpoint_t ep,
                              iocomm_message* out, uint64_t timeout_ms,
                              iocomm_error* err);

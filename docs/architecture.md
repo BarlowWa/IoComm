@@ -226,36 +226,47 @@ NodeId = u64
 | **conn** | 一条双向连接 | **点对点** | 该连接 |
 | **subscription** | 推送回调的注册 | — | — |
 
-**入站连接**由 `iocomm_endpoint_accept()` 注册的回调交付。回调内的句柄是**借用**：只在回调期间有效。持有动作有**三种**——**显式 `conn_retain`**（拉取）、**隐式 `conn_subscribe`**（推送，订阅即所有权），以及**端点级持有**（该端点已启用 `iocomm_subscribe(ep)` / `endpoint_recv(ep)` 时，入站连接在 accept 时即由端点隐式持有，回调内无需再表态）；三者都不做则回调返回时自动收回并以 FIN 优雅关闭。「发完即关」用发送选项 `ICOMM_SEND_CLOSE_AFTER`，`conn_send_async` 本身不是所有权开关。完整契约见 C ABI §5.2 与 [ADR-002](adr/ADR-002-message-addressing-and-ownership.md)。
+**入站连接**由 `iocomm_endpoint_accept()` 注册的回调交付（**双向 HELLO 完成后才触发**，见 §5.2b）。回调内的句柄是**借用**：只在回调期间有效。持有动作有**三种**——**显式 `conn_retain`**（拉取）、**隐式 `conn_subscribe`**（推送，订阅即所有权），以及**端点级持有**（该端点已启用 `iocomm_subscribe(ep)` / `endpoint_recv(ep)` 时，入站连接在**交付的同一时刻**由端点接管，回调内无需再表态）；三者都不做则回调返回时自动收回并以 FIN 优雅关闭。「发完即关」用发送选项 `ICOMM_SEND_CLOSE_AFTER`，`conn_send_async` 本身不是所有权开关。完整契约见 C ABI §5.2 与 [ADR-002](adr/ADR-002-message-addressing-and-ownership.md)。
 
-> **成员资格（2026-11-03，N-01）**：入站连接被持有后即成为监听端点的**成员**，参与 `endpoint_send` 扇出与 `conn_count(ep)`，与 `ep_owner == ep` 的出站成员连接地位相同。**纯服务端（只 accept 不 connect）因此可以对全部入站连接做一次扇出广播。** 此前「入站连接不归属端点、不参与扇出」的规定已废止——它使服务端广播不可用，且与本节 `endpoint` 行自相矛盾。
+> **成员资格（2026-11-03，N-01 / N-03）**：入站连接**在交付（双向 HELLO 完成）时**被持有即成为监听端点的**成员**，参与 `endpoint_send` 扇出与 `conn_count(ep)`，与 `ep_owner == ep` 的出站成员连接地位相同。**握手期的内部会话不在此列**（无句柄、不计入扇出与计数）。**纯服务端（只 accept 不 connect）因此可以对全部入站连接做一次扇出广播。** 此前「入站连接不归属端点、不参与扇出」的规定已废止——它使服务端广播不可用，且与本节 `endpoint` 行自相矛盾。
 
-> **连接由 `connect*()`（出站）或 `accept`（入站）创建**，状态迁移在 `iocomm_conn_t` 上发生。关闭有四条路：`conn_destroy`（取消在途、丢弃缓冲、FIN）、`conn_close_graceful(linger_ms)`（flush 后关）、`ICOMM_SEND_CLOSE_AFTER`（发完即关）、`conn_abort`（RST 异常中止）。
+> **连接句柄由 `connect*()`（出站成功）或 `accept`（入站交付）创建**；**句柄产生后**的状态迁移在 `iocomm_conn_t` 上发生。入站在交付前先经历内部 `Handshaking` 会话（无句柄，见 §5.2b）。关闭有四条路：`conn_destroy`（取消在途、丢弃缓冲、FIN）、`conn_close_graceful(linger_ms)`（flush 后关）、`ICOMM_SEND_CLOSE_AFTER`（发完即关）、`conn_abort`（RST 异常中止）。
 
 ### 5.2b 连接状态机
 
-> 连接由 `connect*()`（出站）或 `accept`（入站）创建，状态迁移在 `iocomm_conn_t` 上发生。
+> 连接由 `connect*()`（出站）或 `accept`（入站交付）产生；**句柄产生后**的状态迁移在 `iocomm_conn_t` 上发生。**出站同样经历 `Handshaking`**：`iocomm_connect` 成功返回 / `connect_async` 的 `on_done(OK)` 都发生在双向 HELLO 完成之后，因此不存在「拿到句柄却还不能发 DATA」的半可用窗口（2026-11-03，N-03）。
 
 ```
-        ┌──────────────┐
-        │ Disconnected │
-        └──────┬───────┘
-               │ iocomm_connect() / iocomm_connect_async()
-        ┌──────▼───────┐
-        │  Connecting  │
-        └──────┬───────┘
-    失败 │      │ 成功
-        │   ┌──▼────────┐
-        │   │ Connected  │
-        │   └──┬────┬───┘
-        │      │    │ 心跳超时 / 断开
-        │      │    ▼
-        │      │ ┌──────────────┐
-        └──────┴▶│ Reconnecting  │── 退避 ──┐
-                 └──────────────┘◀──────────┘
+   Disconnected ──首次 connect*()──► Connecting ──TCP 失败──► [仅首次调用] 返回 DISCONNECTED
+                                       │ TCP 建立成功
+                                       ▼
+                                    Handshaking ──握手失败/超时──► [仅首次调用] 返回 DISCONNECTED / TIMEOUT
+                                       │ 双向 HELLO 完成
+                                       ▼
+                                    Connected ──[仅首次调用] connect 返回 / on_done(OK)
+                                       │ 心跳超时 / 断开
+                                       ▼
+                                    Reconnecting ──退避后重试──► Connecting
+                                       ▲                         │
+                                       └─────────────────────────┘（重试失败则继续退避）
 ```
 
-> **入站连接**由 `accept` 直接进入 `Connected`（不需要 Connecting）。重建由对端发起。
+> **图的读法（唯一口径，2026-11-03 N-03）**：`[仅首次调用]` 的三处出口（TCP 失败、握手失败/超时、成功）只发生在**调用方发起的那次 `connect*()`**；
+> 自动重连再次走 `Connecting → Handshaking → Connected` 时**没有**返回值，也**不再触发** `on_done`（AC-27「恰好一次」）。
+> 重连成功后 `iocomm_conn_t` 是否复用同一句柄，**待 N-06 定**；本图不对此作承诺。
+
+
+> **入站连接**不经 `Connecting`，但要经过 `Handshaking`（双向 HELLO）：
+>
+> ```
+>   Disconnected ──监听 socket 接受──► Handshaking ──双向 HELLO 完成──► Connected
+>                                          │                          （此刻交付：触发 accept 回调）
+>                                          └──失败 / 超时 / 版本不兼容──► Disconnected（不产生 accept 回调）
+> ```
+>
+> `Handshaking` 是**内部会话**：还没有 `iocomm_conn_t` 句柄、不占 `max_handles`、对应用不可见（§5.2、[线格式 §5](../api/wire-format.md)）。
+> 它只在**交付时**（双向 HELLO 完成后）进入 `Connected` 并触发 `accept` 回调——「`Connected` = 应用可见」对入站同样成立。
+> **握手失败 / 超时路径不触发 `accept`**（只产生日志/计数）。重建由对端发起；inproc 没有握手，接受后直接 `Connected` 并交付（[线格式 §7](../api/wire-format.md)）。
 
 **状态是条件集，不是单一枚举**（见 [需求 FR-5.1](requirements.md)）：
 

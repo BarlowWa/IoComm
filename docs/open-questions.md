@@ -1,6 +1,6 @@
 # IoComm 待核实问题清单（2026-10-20）
 
-> **⚠️ 最新批次见 [§8 2026-11-03 新一轮核实](#8-2026-11-03-新一轮核实)——15 条中 N-01 / N-02 / N-15 已按方案 A 处置，其余 12 条未处置。**
+> **⚠️ 最新批次见 [§8 2026-11-03 新一轮核实](#8-2026-11-03-新一轮核实)——15 条中 N-01 / N-02 / N-15 已按方案 A 处置、N-03 已按方案 ①（双向 HELLO 完成后交付）处置，其余 11 条未处置。**
 >
 > **状态（2026-10-22 更新）**：审计来源的 **40 条已核实并处置**——C 37 条、R 3 条（D-08 / B-06 / B-12）。
 >
@@ -178,7 +178,7 @@
 |---|---|---|---|---|---|
 | **N-01** | **B0** | `architecture.md:225`、`c-abi.md:677`、`:841` ↔ `c-abi.md:714-715`、`:719-721`；`requirements.md:276`（AC-30）、`:286`（AC-39） | **端点扇出集合自相矛盾**。前两处说扇出到「该端点全部已建立的连接」；§6.1 却说被持有的入站连接「按不归属端点处理……**它们不参与端点扇出**」。`ep_owner` 只存在于出站 `connect*` 签名，入站路径从不取该参数 ⇒ 扇出集合只剩 `ep_owner == ep` 的出站连接。**纯服务端（只 accept）调 `endpoint_send` 必返回 `NO_RECEIVER`**。AC-30 的 N 无定义，服务端扇出零 AC 覆盖。**引入点**：`d8156aa`（2026-10-22）为解决旧问题「入站连接归属未定义（session-audit 2.5）」新增了这句，但未回改 `:677` 与 `architecture.md:225` | **已按方案 A 处置（2026-11-03）**：入站连接归监听端点；扇出 = 全部成员连接 | **C（已处置 2026-11-03）** |
 | **N-02** | **B0** | `architecture.md:229`、`c-abi.md:526-534`、`:679-685`、`:920-926`、`:941-947`；`requirements.md:279`（AC-33）、`:323`（AC-75）；`ADR-002:30`、`:75` | **端点级 `iocomm_subscribe(ep)` / `endpoint_recv(ep)` 收不到入站消息**。持有动作是**封闭列表**（仅 `conn_retain` / `conn_subscribe`），端点级订阅不在其中；AC-33 也未给端点级订阅留豁免。更硬的一点：`c-abi.md:179` 把 `endpoint_accept` 与 `iocomm_subscribe` 同列在 `INVALID_STATE（recv 已启用）`，即 `endpoint_recv(ep)` 与 `endpoint_accept(ep)` **结构性互斥**，"用端点级拉取绕过 accept"这条路被 API 自身堵死。另：`iocomm_subscribe` / `endpoint_recv` 在 `requirements.md` 中**零 FR / AC** | 与 N-01 同根因，**一并裁决**。**已按方案 A 处置（2026-11-03）**：新增 FR-8.11 + 端点级持有规则 + AC-104 | **C（已处置 2026-11-03）** |
-| **N-03** | **B1** | `c-abi.md:525`；`wire-format.md:162`、`:166`；旧账：`iocomm-design-audit/cross-doc-consistency.md` XD-22 | **accept 回调的交付时点未定义**（TCP 建立时 vs 双向 HELLO 完成后）。`wire-format.md` 全文 `accept` **零命中**。后果：`accept` 回调内用 `CLOSE_AFTER` 发首条数据（README 主推写法）在"TCP 建立即交付"的实现下会被对端以「未握手 DATA」直接断链（`wire-format.md:166`）。inproc 不跑 HELLO，即便定为「HELLO 后交付」，其 `peer_node_id` 来源仍空白 | M2 前二选一并写进 §5.2：① 交付时点 = 双向 HELLO 完成（`peer_node_id` 必有值，且与借用语义相容）；② 交付时点 = TCP 建立（须显式规定握手完成前禁止发送 DATA、`peer_node_id` 允许 0）。推荐 ① | 未处置 |
+| **N-03** | **B1** | `c-abi.md` §5.2 `iocomm_accept_fn` / `iocomm_peer_info`；`wire-format.md` §5、§7；`architecture.md` §5.2b；旧账：`iocomm-design-audit/cross-doc-consistency.md` XD-22 | **accept 回调的交付时点未定义**（TCP 建立时 vs 双向 HELLO 完成后）。`wire-format.md` 曾全文 `accept` **零命中**。后果：`accept` 回调内用 `CLOSE_AFTER` 发首条数据（README 主推写法）在"TCP 建立即交付"的实现下会被对端以「未握手 DATA」直接断链（`wire-format.md` §5 规则 3）。inproc 不跑 HELLO，其 `peer_node_id` 来源亦空白 | M2 前二选一并写进 §5.2：① 交付时点 = 双向 HELLO 完成（`peer_node_id` 必有值，且与借用语义相容）；② 交付时点 = TCP 建立（须显式规定握手完成前禁止发送 DATA、`peer_node_id` 允许 0）。推荐 ① | **C（已处置 2026-11-03）**：采用**方案 ①**（与预设倾向一致）。交付时点 = 双向 HELLO 完成；握手期连接为**内部会话占位**（不分配句柄、不占 `max_handles`、应用不可见）；握手失败/超时不产生 `accept`；`peer_node_id` 必有真实值。**inproc 显式定义**为「建立即交付」，`peer_node_id` 取对端 Runtime `node_id`（仅竞态为 0）。落点：`c-abi.md` §5.2 / §6.0 / §6.1、`wire-format.md` §5 规则 7 / §7、`architecture.md` §5.2b（新增 `Handshaking` 态）、`requirements.md` FR-8.5 + AC-92 ⑦、`README.md` 第 3 步。否决方案 ② 理由见 §8.4b |
 
 ### 8.2 重要（实现前定）
 
@@ -186,7 +186,7 @@
 |---|---|---|---|---|---|
 | **N-04** | B2 | `architecture.md:190`、`:195`；`c-abi.md:254` | **`node_id` 派生分支与 v1 语义互斥**：不可写时「从 machine-id / 主机名 / MAC 派生稳定哈希」是主机级纯函数，同机多进程必得**同一个** NodeId，直接违反「NodeId 唯一标识一个 Runtime 实例」。另 `state_dir` 注释写「可 NULL」，但自动模式只描述"在 state_dir 下读写"，**NULL 无分支**；docs 全文未规定 Windows 派生源（`MachineGuid` 未出现） | 定 `state_dir == NULL` 的策略（建议：视为不可写路径，但派生值必须掺入进程唯一量，或直接拒绝自动模式并要求显式 `node_id`）；把「只读文件系统」分支改为与 v1 语义相容的方案；补 Windows 派生源 | 未处置 |
 | **N-05** | B2 | `c-abi.md:575-581`、`:1030-1037`；`wire-format.md:258`；`architecture.md:340` | **`connect_node` 的地址解析规则不存在**。`connect_node` 只收 `node_id` + 端点名；`iocomm_endpoint_info.addr` 由 `ENDPOINTS` tag 原样上报，但**在 ABI 里没有任何消费者**。真正缺的是「`node_info` + 端点名 → 可拨号地址」的解析规则，以及「通配监听地址（`0.0.0.0:0` / `:0`）如何通告」的规则。（原判断「addr 被对端直接拿去 connect」不成立，已更正） | 补一节解析规则：成员查找 → 按 transport 选地址 → 通配地址用信标源 IP/端口替换 → 失败码；同时明确 `endpoint_info.addr` 的语义（通告值 vs 原始监听值） | 未处置 |
-| **N-06** | B2 | `requirements.md:91`（FR-4.4）、`:266`（AC-20）；`architecture.md:235`、`:249-253`、`:318`；`c-abi.md:1399-1400` | **重连语义零文字**：重连成功后 `iocomm_conn_t` 是否复用；队列中在途消息是否跨重连保留；`sequence` 是否按连接重计；`peer_node_id` / 订阅是否保持。AC-20 只验 `reconnects` 计数 | 至少定四件事：句柄复用（建议复用，否则应用无法持有稳定句柄）、在途消息（建议断开即清空并按 `PEER_GONE` 结算，重连不重放）、`sequence`（建议随连接重置并在重连后以新 `peer_node_id` 标识）、订阅保持（建议保持）。补 AC | 未处置 |
+| **N-06** | B2 | `requirements.md:91`（FR-4.4）、`:266`（AC-20）；`architecture.md:235`、`:249-253`、`:318`；`c-abi.md:1399-1400` | **重连语义零文字**：重连成功后 `iocomm_conn_t` 是否复用；队列中在途消息是否跨重连保留；`sequence` 是否按连接重计；`peer_node_id` / 订阅是否保持。AC-20 只验 `reconnects` 计数。**处置时须回写 AC-86 的 `connected=UNKNOWN` 子项并另补一条 AC**（N-03 裁决后该子项无处观测） | 至少定四件事：句柄复用（建议复用，否则应用无法持有稳定句柄）、在途消息（建议断开即清空并按 `PEER_GONE` 结算，重连不重放）、`sequence`（建议随连接重置并在重连后以新 `peer_node_id` 标识）、订阅保持（建议保持）。补 AC | 未处置 |
 | **N-07** | B2 | `architecture.md:264`、`:317`；`c-abi.md:331`、`:332`、`:402` | **`heartbeat_miss_limit` 默认值仍不可判定**：`:317` 写「N 可配，默认 ≥ 3」（下界），`:264` 的 `Healthy` 定义按「默认 3 个心跳周期」算，`:332` 只写「0 = 保持」。另 `c-abi.md:331` 的「默认 2000 ms（见架构 §6.2）」是**悬空引用**——`architecture.md:312-318` 全文没有 2000（该值由 `efb22bf` 改入，架构侧未同步） | 把 `heartbeat_ms = 2000`、`heartbeat_miss_limit = 3` 写成具体默认值并落到架构 §6.2；删除或修正悬空引用 | 未处置 |
 | **N-08** | B3 | `c-abi.md:352-356`、`:168`；`architecture.md:93`、`:128`、`:384` | **`iocomm_runtime_run_for` 语义未定义**：无注释、无需求来源（`requirements.md` 零命中）、错误矩阵无 `TIMEOUT`；`duration_ms = 0` 与返回值语义完全无定义；与 `run_once` 的关系（是否等于循环）未写 | 补注释：`run_for(duration_ms)` = 循环 `run_once` 直到累计耗时达 `duration_ms`；`0` 的语义（建议 = 不等待）；返回码与 `run_once` 同口径。补一条需求来源 | 未处置 |
 | **N-12** | B2 | `c-abi.md:408-427`、`:323-341`；`architecture.md:315` | **端点级套接字参数缺失**：`TCP_NODELAY`、监听 backlog、keepalive 开关在 `endpoint_config` / `tune_config` 中均无字段（docs + README 对 `TCP_NODELAY`、`backlog` 零命中）。对「小消息、低延迟」的工业 IO，Nagle 可能引入数十毫秒；backlog 溢出表现为连接被拒且计数不可见 | 至少在 `endpoint_config` / `tune_config` 尾部追加 `tcp_nodelay`（建议默认开）与 `listen_backlog`；若定为不可配置，须写进非目标并说明替代方案 | 未处置 |
@@ -221,9 +221,21 @@
 > `architecture.md` §5.2 对象模型表与借用语义段；`requirements.md` AC-30（N 定义）、AC-33、AC-39（过滤口径）、AC-32（端点级互斥）；
 > 新增端点级订阅的 FR + AC；`README.md` 第 3 步注释。
 
+### 8.4b N-03 的裁决方案
+
+> **裁决结果（2026-11-03）：采用方案 ①（交付时点 = 双向 HELLO 完成后）**。与预设倾向一致。
+> 落点见 §8.1 N-03 行「状态」栏。下表保留作决策记录。
+
+| 方案 | 内容 | 优点 | 代价 |
+|---|---|---|---|
+| **① 双向 HELLO 后交付（采用）** | `accept` 回调在双方都收到合法 `HELLO` 后触发；握手期连接为内部会话（无 conn 句柄、不占 `max_handles`、不参与 `conn_count`/扇出）；`peer_node_id` 必有真实值；握手失败/超时不产生回调 | 与借用语义自洽（借出的是**可用**连接）；README 主推的「回调内 `CLOSE_AFTER` 发首条」天然合法；`peer_node_id` 取值可无条件承诺；`max_handles` 只计应用可见句柄，口径干净；应用只被通知「可用连接」，无「半可用」窗口 | 握手期需一个**内部会话**结构（不等同于 `iocomm_conn_t`）；`max_handles` 口径从「accept 分配即计入」改为「交付时计入」；`endpoint_destroy` 需额外说明「握手期会话一并 FIN、不回调」 |
+| ② TCP 建立即交付 | 接受 socket 即回调；`peer_node_id` 允许 0；规定握手完成前禁止发 DATA（含 `CLOSE_AFTER`） | 回调更早，理论上可做「连接准入过滤」 | **准入过滤不成立**：`accept` 回调没有接受/拒绝返回值，拒绝只能靠回调内 `conn_destroy`，而握手期本就无数据可判；**「回调内发首条」被禁用**，README 主推写法回到「先缓冲、握手后再发」的复杂语义，且需定义 `send_async` 在握手期的缓冲/失败规则；`peer_node_id` 恒可能为 0，现场排障时「谁连进来了」无法第一时间回答；借用语义下借出一条「尚不能发」的连接，应用必须自行处理握手态 |
+
+**否掉方案 ② 的核心理由**：它把「连接建立」与「连接可用」拆成两个应用可见的时点，却没有给应用任何观测二者差别的机制（无握手完成回调、无「握手态」条件位），于是「回调内发数据」要么被静默缓冲（无法区分已发/在缓冲），要么被禁止。方案 ① 让「交付 = 可用」成为不变量，代价只是一个不占句柄名额的内部会话，小于方案 ② 引入的语义分叉。
+
 ### 8.5 建议处置顺序
 
-1. **N-01 / N-02 / N-15**（同根因，阻断）——先定 §8.4 的方案 A/B，再一次性改五处文档与三条 AC。
-2. **N-03**（M2 线格式冻结前）——决定 README 主推示例是否可用。
+1. **N-01 / N-02 / N-15**（同根因，阻断）——**已处置（方案 A，提交 95c8fa6）**。
+2. **N-03**（M2 线格式冻结前）——**已处置（方案 ①，双向 HELLO 后交付）**；同批顺带定义了出站 `connect*` 的返回时点与握手期内部会话上限。
 3. **N-04 / N-05 / N-06 / N-07 / N-12**（M3/M4 前）。
 4. **N-08 / N-09 / N-10 / N-11 / N-13 / N-14**（可随对应文档批次顺带修）。

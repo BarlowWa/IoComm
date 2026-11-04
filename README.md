@@ -83,11 +83,14 @@ iocomm_subscription_t accept_sub = 0;
 iocomm_endpoint_accept(rt, ep, on_new_connection, user_data, &accept_sub, &err);
 
 /*    在 on_new_connection 里，连接句柄是**借用**的——只在回调期间有效。
+ *    **回调在双向 HELLO 完成后才触发**（tcp/unix/pipe）：此时对端身份已知
+ *    （peer_node_id 有真实值）、连接已可发 DATA，所以下面的「发一条就关」是合法的；
+ *    握手失败/超时不会走到这个回调。inproc 无握手，连接建立即回调。
  *    要持有它必须三选一，否则回调返回时连接会被优雅关闭（视为拒绝）：
  *      iocomm_conn_subscribe(rt, conn, on_message, user, &sub, &err);      // 推送收（订阅即持有）
  *      iocomm_conn_retain(rt, conn, &err);                                 // 拉取收（显式持有）
  *      端点级：先前已调 iocomm_subscribe(rt, ep, ...) / endpoint_recv(rt, ep, ...)
- *              → 入站连接在交付前已由端点隐式持有，回调内**无需再表态**
+ *              → 入站连接在**交付时**即由端点接管，回调内**无需再表态**
  *                （此模式下甚至可以不注册 endpoint_accept）
  *    「发一条就关」不是 conn_send_async + 什么都不做，而是显式带关闭标志：
  *      iocomm_send_options opt = ICOMM_SEND_OPTIONS_INIT;
