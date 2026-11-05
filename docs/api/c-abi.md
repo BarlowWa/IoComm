@@ -139,6 +139,11 @@ const char* iocomm_strerror(int32_t code);  /* 静态存储期，不要 free */
 | `err != NULL` 但 `err->size < sizeof(iocomm_error)` | **不读取 `size`**（本结构体不做版本协商），按完整结构体写入 |
 | 库捕获到 panic | 返回值 `ICOMM_ERR_INTERNAL`，`message` 含 `"panic"` 前缀 |
 
+> **没有例外**（2026-11-05，N-38 复核）：本表对全部 `iocomm_error*` 参数无一例外地生效。
+> 曾经考虑过让「端点级持有后的 `conn_recv`」返回 `TIMEOUT` 且不写 `err`，**已否决**——
+> 那会给全库开一个先例，并迫使调用方同时检查返回值与 `err.code` 才能区分「真超时」与「路由在别处」。
+> **现口径**：该情形返回 **`ICOMM_ERR_INVALID_STATE`**（与 §6.4「先 subscribe 再 recv」同码，`err` 照常填充），见 §5.2 与矩阵 `iocomm_conn_recv` 行。
+
 > **`size` 字段在 `iocomm_error` 上不做协商**：它是库写、调用方读的输出结构体（§2 首字段规则的例外）。
 > 调用方**不必**预置 `size`；库无条件写完整结构体。
 
@@ -165,14 +170,15 @@ const char* iocomm_strerror(int32_t code);  /* 静态存储期，不要 free */
 | 函数族 | 可能的错误码（`OK` 除外） |
 |---|---|
 | `iocomm_runtime_create` | `INVALID_ARGUMENT`（`cfg` 为 NULL / `max_message_size > 64 MiB` 或 **< 56 B**（见 §6.0）/ 枚举非法 / **`node_id == 0` 时 `state_dir` 为空或不可写**）、`CONFLICT`（`node_id == 0` 时 `state_dir` 的名字文件已被**另一存活进程**占用，见 `runtime_config.node_id` 注释）、`RESOURCE_EXHAUSTED`、`INTERNAL` |
-| `iocomm_runtime_start` / `iocomm_runtime_stop` / `iocomm_runtime_drain` | `STALE_HANDLE`、`WOULD_BLOCK`（manual `drain` 未排空）、`TIMEOUT`、`INTERNAL`（Stopped 下 `stop` 幂等、`drain` 合法；`start` 的返回码见下行） |
+| `iocomm_runtime_start` / `iocomm_runtime_drain` | `STALE_HANDLE`、`WOULD_BLOCK`（manual `drain` 未排空）、`INTERNAL`（Stopped 下 `drain` 合法；`start` 的返回码见下行）。**两者都没有 `WOULD_DEADLOCK`**：`start` 不阻塞；`drain` 在 manual 模式下**本来就要求**在 loop 线程上交替 `run_once` 调用（见下方注释），在 loop 线程调用是**正常用法** |
+| `iocomm_runtime_stop` | `STALE_HANDLE`、`TIMEOUT`、`WOULD_DEADLOCK`（**loop 线程或回调内**且 `timeout_ms > 0`——它要等 IO 收敛，等待即自锁；`timeout_ms == 0` 不等待，**不返回此码**）、`INTERNAL`（Stopped 下幂等） |
 | **Stopped 下的其余写操作**（`runtime_start` / `endpoint_create` / `connect*` / `subscribe` / `*_send*` / `discovery_start` / `monitor_open` 等） | `CLOSED`（Runtime 已停止接受写；Stopped 不可重启，恢复需重建 Runtime；见 §4 状态机）。**只读查询不受影响**（`conn_status` / `stats_snapshot` / `endpoint_count` / `endpoint_get` / `discovery_snapshot_*` / `diagnostic_dump` 等照常） |
 | `iocomm_runtime_run_once` / `iocomm_runtime_run_for` | `STALE_HANDLE`、`INVALID_STATE`（**owned 模式**下调用）、`INTERNAL`；**`run_once` 另有 `TIMEOUT` = 本轮空闲**（正常事件，非故障，见下方注释）。**与 Runtime 状态无关**——manual 模式下 Created / Running / Stopped 均可调用（Stopped 下用于排空） |
 | `iocomm_runtime_reconfigure` | `STALE_HANDLE`、`INVALID_ARGUMENT`（含 `max_message_size` 非 0 时越出 56 B–64 MiB）、`CLOSED`（Stopped 后）、`INTERNAL` |
 | `iocomm_runtime_node_id` | `STALE_HANDLE`、`INVALID_ARGUMENT`（`out_node_id` 为 NULL，按 §3.2 通用出参规则）、`CLOSED`（Runtime 已 Stopped）、`INTERNAL` |
 | `iocomm_runtime_node_name` | `STALE_HANDLE`、`INVALID_ARGUMENT`（`buf` / `out_len` 为 NULL）、`RESOURCE_EXHAUSTED`（缓冲不足，`out_len` 给所需长度）、`INTERNAL` |
 | `iocomm_endpoint_create` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`ALREADY_EXISTS`（**同进程**已持有同名端点）、`CONFLICT`（端点名已被**他进程**占用）、`RESOURCE_EXHAUSTED`、`NOT_SUPPORTED`（未知 transport / 平台不支持）、`INTERNAL` |
-| `iocomm_endpoint_destroy` / `iocomm_conn_destroy` / `iocomm_conn_abort` | `STALE_HANDLE`、`INTERNAL` |
+| `iocomm_endpoint_destroy` / `iocomm_conn_destroy` / `iocomm_conn_abort` | `STALE_HANDLE`、`WOULD_DEADLOCK`（**回调内销毁非本回调交付的连接 / 订阅**，见 §6.4 回调规则 `@forbid`；销毁**本回调交付的**连接是 §6.4 `@special` 允许的，不返回此码）、`INTERNAL` |
 | `iocomm_runtime_wakeup` | **无错误通道**（AC-95 豁免）；返回值为错误码，无 `err` 出参 |
 | `iocomm_endpoint_lookup` / `iocomm_endpoint_get` / `iocomm_conn_get` / `iocomm_discovery_snapshot_get` | `STALE_HANDLE`、`NOT_FOUND`、`INVALID_ARGUMENT`、`INTERNAL`（`snapshot_get` 另有 `NOT_FOUND` = index 越界） |
 | `iocomm_conn_count` / `iocomm_discovery_snapshot_count` | `STALE_HANDLE`、`INTERNAL`（走 `err`；出错返回 0 并置 `err`） |
@@ -180,25 +186,28 @@ const char* iocomm_strerror(int32_t code);  /* 静态存储期，不要 free */
 | `iocomm_endpoint_name_state` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INTERNAL`（错误码仍走 `err`，返回值恒为 0） |
 | `iocomm_endpoint_local_addr` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`（**纯出站端点**没有监听地址，见 §5.1c 规则 1）、`RESOURCE_EXHAUSTED`、`INTERNAL` |
 | `iocomm_endpoint_set_overflow` | `STALE_HANDLE`、`INVALID_ARGUMENT`（枚举非法）、`INTERNAL` |
-| `iocomm_endpoint_accept` / `iocomm_subscribe` / `iocomm_conn_subscribe` / `iocomm_conn_condition_subscribe` / `iocomm_endpoint_condition_subscribe` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`（`recv` 已启用；`conn_subscribe` 另有「该连接已由端点级订阅/拉取持有」，见 §5.2）、`RESOURCE_EXHAUSTED`、`INTERNAL` |
-| `iocomm_unsubscribe` / `iocomm_conn_close_graceful` / `iocomm_conn_retain` | `STALE_HANDLE`、`INVALID_STATE`、`WOULD_DEADLOCK`（loop 线程；`unsubscribe` 本订阅回调内除外）、`TIMEOUT`、`INTERNAL` |
+| `iocomm_endpoint_accept` | `STALE_HANDLE`、`INVALID_ARGUMENT`（**纯出站端点**——`listen_transport` 与 `listen_addr` 均空，§5.1c 规则 1——没有可交付的入站连接）、`RESOURCE_EXHAUSTED`、`INTERNAL`。**无 `INVALID_STATE`**——它与端点级收消息（`iocomm_subscribe(ep)` / `iocomm_endpoint_recv(ep)`）是**两条正交的轴**，可任意顺序注册（2026-11-05，N-37，见 §6.4 开头的「正交性」段） |
+| `iocomm_subscribe` / `iocomm_conn_subscribe` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`（`recv` 已启用，§6.4 二选一；`conn_subscribe` 另有「该连接已由端点级订阅 / 拉取持有」，见 §5.2）、`RESOURCE_EXHAUSTED`、`INTERNAL` |
+| `iocomm_conn_condition_subscribe` / `iocomm_endpoint_condition_subscribe` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`RESOURCE_EXHAUSTED`、`INTERNAL`。**无 `INVALID_STATE`**——状态订阅与消息接收是两条独立的通道，不受 §6.4 的 `subscribe` / `recv` 二选一约束 |
+| `iocomm_unsubscribe` / `iocomm_conn_close_graceful` | `STALE_HANDLE`、`INVALID_STATE`、`WOULD_DEADLOCK`（loop 线程；`unsubscribe` 本订阅回调内除外）、`TIMEOUT`、`INTERNAL` |
+| `iocomm_conn_retain` | `STALE_HANDLE`、`INTERNAL`。**任意线程可调**（含 loop 线程与 accept 回调内）——它只改所有权表，不等待、不投递、不阻塞，因此**没有 `WOULD_DEADLOCK`、没有 `TIMEOUT`**（2026-11-05，N-36：此前与 `unsubscribe` 同行的写法会使 AC-29 / AC-40 的用法直接失败） |
 | `iocomm_connect` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`NOT_SUPPORTED`、`TIMEOUT`、`DISCONNECTED`、`NO_RECEIVER`、`WOULD_DEADLOCK`、`RESOURCE_EXHAUSTED`、`INTERNAL` |
 | `iocomm_connect_node` | 同 `iocomm_connect`，另加 `NOT_FOUND`（节点或端点成员不在发现表中，见 §5.2a） |
 | `iocomm_connect_async` / `iocomm_connect_node_async` | 同步返回：`STALE_HANDLE`、`INVALID_ARGUMENT`、`NOT_SUPPORTED`、`NOT_FOUND`（仅 `connect_node_async`，见 §5.2a）、`WOULD_DEADLOCK`、`RESOURCE_EXHAUSTED`、`INTERNAL`；其余结果走 `on_done` |
 | `iocomm_conn_send` / `iocomm_endpoint_send` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`、`TOO_LARGE`、`NO_RECEIVER`、`WOULD_BLOCK`、`DISCONNECTED`、`TIMEOUT`、`WOULD_DEADLOCK`、`CLOSED`、`INTERNAL` |
 | `iocomm_conn_send_async` / `iocomm_endpoint_send_async` | 同步返回：`STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`、`TOO_LARGE`、`WOULD_DEADLOCK`、`CLOSED`、`RESOURCE_EXHAUSTED`（`op_id` 空间耗尽，见 §6.2）、`INTERNAL`；其余走 `on_done` |
 | `iocomm_send_cancel` | `STALE_HANDLE`、`NOT_FOUND`（op 已完成）、`INVALID_ARGUMENT`、`INTERNAL` |
-| `iocomm_endpoint_recv` / `iocomm_conn_recv` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`（已 subscribe）、`TIMEOUT`、`WOULD_DEADLOCK`、`CLOSED`、`INTERNAL` |
+| `iocomm_endpoint_recv` / `iocomm_conn_recv` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`（已 subscribe；**`conn_recv` 另有「该连接已由端点级订阅 / 拉取持有」——此时路由在端点队列，且该情形 `err` 照常填充**，见 §6.4）、`TIMEOUT`、`WOULD_DEADLOCK`、`CLOSED`、`INTERNAL` |
 | `iocomm_discovery_start` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`ALREADY_EXISTS`（已启动）、`NOT_SUPPORTED`、`RESOURCE_EXHAUSTED`、`INTERNAL` |
 | `iocomm_discovery_stop` | `STALE_HANDLE`、`INVALID_STATE`（未启动）、`WOULD_BLOCK`、`TIMEOUT`、`INTERNAL` |
 | `iocomm_discovery_snapshot_take` | `STALE_HANDLE`、`RESOURCE_EXHAUSTED`、`INTERNAL` |
 | `iocomm_discovery_snapshot_release` | **无错误通道**（AC-95 豁免）：返回值承载——`0` = 成功，`ICOMM_ERR_STALE_HANDLE` = 重复释放或快照句柄已失效，`ICOMM_ERR_INTERNAL` = 内部错误 |
 | `iocomm_monitor_open` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`RESOURCE_EXHAUSTED`、`INTERNAL` |
-| `iocomm_monitor_poll` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`CLOSED`（ttl 到期）、`WOULD_DEADLOCK`（loop 线程 `timeout_ms > 0`）、`TIMEOUT`、`INTERNAL` |
+| `iocomm_monitor_poll` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`CLOSED`（ttl 到期）、`WOULD_DEADLOCK`（loop 线程 `timeout_ms > 0`）、`INTERNAL`。**无 `TIMEOUT`**：超时以 `ICOMM_OK` + `out_n == 0` 报告（见 §9.4 注释；2026-11-05 修正此前矩阵与注释的矛盾） |
 | `iocomm_monitor_close` | `STALE_HANDLE`、`INVALID_STATE`、`WOULD_BLOCK`、`INTERNAL` |
 | `iocomm_monitor_capture_set` / `iocomm_mon_record_payload` / `iocomm_monitor_dump` | `STALE_HANDLE`、`INVALID_STATE`、`NOT_SUPPORTED`（v1）、`RESOURCE_EXHAUSTED`、`NOT_FOUND`、`WOULD_BLOCK`、`INTERNAL` |
 | `iocomm_monitor_get_stats` / `iocomm_stats_snapshot` / `iocomm_conn_status` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INTERNAL` |
-| `iocomm_diagnostic_dump` | `STALE_HANDLE`、`RESOURCE_EXHAUSTED`、`INTERNAL` |
+| `iocomm_diagnostic_dump` | `STALE_HANDLE`、`RESOURCE_EXHAUSTED`、`INTERNAL`。**线程属性**：与 `stats_snapshot` 同属「返回拷贝的安全入口」，**可跨线程**（2026-11-05；此前未在架构 §3.3 列出，已补） |
 | `iocomm_message_release` / `iocomm_free_text` / `iocomm_strerror` / `iocomm_version_string` / `iocomm_abi_version` / `iocomm_runtime_destroy` | **无错误通道**（AC-95 豁免） |
 
 > **AC-95 的判定口径**：头文件注释中的 `@errors` **或**其指向的本表，二者取其一即可。
@@ -334,7 +343,11 @@ int32_t iocomm_runtime_start(iocomm_runtime_t rt, iocomm_error* err);
  * 超时返回 `ICOMM_ERR_TIMEOUT` 且 **Runtime 已进入 Stopped**（不再接受新写）。
  * **在途操作不被取消**（与 `runtime_destroy` 不同，见 §5.2 的取消表与 `on_done` 码表）：已登记的 `on_done` 仍会在
  * `run_once` / IO 线程上触发，manual 模式须继续驱动 loop 排空。
- * `timeout_ms = 0` = 不等待，立即进入 Stopped。 */
+ * `timeout_ms = 0` = 不等待，立即进入 Stopped。
+ * **manual 模式怎么等**（2026-11-05）：`timeout_ms > 0` 时要等 loop 收敛，因此在 **loop 线程上调用会自锁** ——
+ *   返回 `WOULD_DEADLOCK`（矩阵见 §3.2.1）。两种正确用法：① loop 线程上 `stop(rt, 0)`，随后用 `run_once` / `drain` 排空；
+ *   ② **另一线程** `stop(rt, timeout_ms > 0)`，loop 线程同时继续驱动 `run_once`。
+ *   `drain` **不受此限**——manual 模式本就要求它在 loop 线程上调用（见下）。 */
 int32_t iocomm_runtime_stop (iocomm_runtime_t rt, uint64_t timeout_ms, iocomm_error* err);
 
 /* 优雅关闭：owned 模式返回时保证已排空；
@@ -398,7 +411,12 @@ void    iocomm_runtime_destroy(iocomm_runtime_t rt);  /* 强制关闭，取消�
  * 且都**必须在 loop 线程上调用**（与 `run_once` 同属非线程安全入口，架构 §3.3）。
  *
  * `iocomm_runtime_run_once(rt, timeout_ms)`：驱动一轮 loop，等待至多 `timeout_ms`。
- *   - 本轮处理了至少一件事（就绪 IO / 到期定时器 / 内部任务）→ `ICOMM_OK`；
+ *   - 本轮处理了至少一件事（就绪 IO / 到期定时器 / 内部任务 / **被 `runtime_wakeup` 唤醒**）→ `ICOMM_OK`；
+ *     **唤醒的处理优先级低于就绪 IO 与到期定时器**——若同一轮既有唤醒又有 IO，仍按「处理了事件」计；
+ *     只有当唤醒是本轮**唯一**的处理对象时才因唤醒返回 `OK`。
+ *     **纯唤醒也返回 `OK`**（2026-11-05，N-50）：`runtime_wakeup` 存在的意义就是「有外部状态需要本轮立刻看一眼」，
+ *     若返回 `TIMEOUT` 则调用方无法把它与「真的空闲」区分，`while (rc == OK)` 型的循环也无法在唤醒后重新进入工作态。
+ *     注意这与「唤醒不携带数据」并不矛盾——唤醒只保证本轮**从等待中返回**，数据仍由调用方自己的数据结构承载。
  *   - `timeout_ms` 内一件事都没有 → `ICOMM_ERR_TIMEOUT`，并**置 `err`**
  *     （与本文件其余函数「非 OK 必置 err」一致，§3.1）。
  *     **这是正常的空闲，不是故障**：不写日志、不计数、不产生审计事件。
@@ -409,6 +427,29 @@ void    iocomm_runtime_destroy(iocomm_runtime_t rt);  /* 强制关闭，取消�
  *           do_my_work();                             /* 空闲也要执行，故不能用 while(rc == OK) */
  *           if (my_shutdown_requested) break;
  *       }
+ *
+ * **没有 `post`，怎么把回调里的事推到下一轮？**（2026-11-05，N-43 —— v1 的推荐形态）
+ * 本库 v1 **不提供**「投递一段代码到 loop 下一轮」的入口（§9.8）。正确做法是**回调内只做三件事**：
+ *   ① 把要保留的数据**拷贝出来**（`msg->payload` 只在本轮回调内有效）；
+ *   ② 置一个**由应用自己拥有**的标志位；
+ *   ③ 需要立刻回应的，用**异步**发送（内部投递到 loop，回调内合法）。
+ * 数据处理放到 `run_once` 返回之后：
+ *
+ *     static void on_message(void* user, iocomm_endpoint_t ep, const iocomm_message* m) {
+ *         app* a = user;
+ *         memcpy(a->buf, m->payload.data, m->payload.len);  /* ① 拷贝出来（iocomm_slice 字段是 data/len） */
+ *         a->len = m->payload.len;
+ *         a->pending = 1;                                   /* ② 置标志 */
+ *     }
+ *     for (;;) {
+ *         (void)iocomm_runtime_run_once(rt, 5);             /* 至多 5 ms */
+ *         if (a->pending) { a->pending = 0; do_app_work(a->buf, a->len); }   /* ③ 在此做业务 */
+ *         do_periodic_control();                            /* 控制周期本体 */
+ *     }
+ *
+ * 需要句柄的（例如「新连接来了要记下来」）：在 accept 回调内 `conn_retain`，下一轮用 `conn_get` 枚举。
+ * **唯一做不到的是「在回调内延迟 N ms」**——而 `post` 同样做不到：v1 本就没有定时器公开入口
+ * （架构 §7 T6）。需要在应用侧延迟，就用你自己的控制周期计数器。
  *
  * `iocomm_runtime_run_for(rt, duration_ms)`：**循环 `run_once`**，直到**累计**运行时长达到 `duration_ms`。
  *   - 它不是新的等待语义，只是 `run_once` 的循环外壳：单次 `run_once` 的等待不超过剩余时长。
@@ -447,7 +488,7 @@ const char* iocomm_version_string(void);
 const iocomm_abi_header* iocomm_abi_version(void);
 ```
 
-> **manual 模式的硬约束**：手动模式下只有一个线程在驱动 loop。在该线程上调用同步 API 会返回 `ICOMM_ERR_WOULD_DEADLOCK`（见 §6）。`runtime_drain` 在 manual 模式下不做阻塞排空。
+> **manual 模式的硬约束**：手动模式下只有一个线程在驱动 loop。在该线程上调用**阻塞型**同步 API 会返回 `ICOMM_ERR_WOULD_DEADLOCK`（见 §6）。**非阻塞的所有权 / 注册类调用不受此限**——`conn_retain` / `conn_subscribe` / `endpoint_accept` / 两个 `*_condition_subscribe` / `runtime_wakeup` 在该线程上**合法**（见 §3.2.1 矩阵与 §6.4 `@special`）。`runtime_drain` 在 manual 模式下不做阻塞排空。
 
 ---
 
@@ -711,9 +752,13 @@ int32_t iocomm_endpoint_local_addr(iocomm_runtime_t rt, iocomm_endpoint_t ep,
  *   （同地址空间直接读取，仅在对端 Runtime 已销毁的竞态下为 0）。详见 [线格式 §5 / §7](wire-format.md)。
  *
  * **inbound 是借用句柄，只在本次回调期间有效**（借用语义，见 ADR-002）：
- *   - 什么都不做              → 回调返回时库自动收回并以 FIN 优雅关闭（= 拒绝）
+ *   - 什么都不做              → **全部** accept 回调返回后若仍无任何持有动作，库自动收回并以 FIN 优雅关闭（= 拒绝）
+ *                               （多次注册时「任一回调完成持有即保留」，见 AC-33；2026-11-05，N-37）
  *   - iocomm_conn_subscribe   → **隐式持有**（订阅即所有权），连接保持打开
- *   - iocomm_conn_retain      → 唯一显式持有，用于拉取模式（之后可在别的线程 conn_recv）
+ *   - iocomm_conn_retain      → 显式持有。**对未被端点级收消息持有的连接**：用于拉取模式
+ *                               （之后可在别的线程 conn_recv），并把投递切到该连接的接收队列；
+ *                               **对已由端点级推送/拉取持有的连接**：只做所有权确认（见下方「端点级持有」）。
+ *                               **可在回调内调用**，不返回 WOULD_DEADLOCK（矩阵见 §3.2.1）。
  *   - iocomm_conn_send_async  → **仅在 send_options.flags 含 ICOMM_SEND_CLOSE_AFTER 时合法**：
  *                               数据 flush 后优雅关闭，on_done 之后句柄失效；
  *                               未设 CLOSE_AFTER 且未 subscribe/retain → ICOMM_ERR_INVALID_STATE
@@ -723,8 +768,14 @@ int32_t iocomm_endpoint_local_addr(iocomm_runtime_t rt, iocomm_endpoint_t ep,
  * **端点级持有**（2026-11-03，N-02）：该端点上已启用 `iocomm_subscribe(ep)` 或
  * `endpoint_recv(ep)` 时，端点在**交付的同一时刻**接管入站连接（交付前它是库的内部会话，
  * 无句柄、不计入扇出与 `conn_count(ep)`——见下方交付时点），回调内无需再调任何持有动作；
- * 此时回调仍会触发（用于观测新连接），但回调内对该连接调 `conn_subscribe` 返回
- * `INVALID_STATE`（已由端点持有），`conn_retain` 幂等返回 `OK`。
+ * 此时回调仍会触发（用于观测新连接，**2026-11-05 N-37：这与端点级收消息正交，不构成互斥**），
+ * 但回调内对该连接调 `conn_subscribe` 返回 `INVALID_STATE`（已由端点持有）。
+ *
+ * **此时 `conn_retain` 只做所有权确认、不改投递路由**（2026-11-05，N-38）：返回 `OK`（幂等），
+ * 消息**继续进入端点接收队列**，对该连接调 `conn_recv` 返回 **`ICOMM_ERR_INVALID_STATE`**
+ * （与 §6.4「先 subscribe 再 recv」同码：这条连接已被端点订阅持有，连接级拉取不可用）。
+ * 路由在「端点级持有」成立的那一刻就已定死——若需要连接级拉取，应在端点持有**之前**就选定，
+ * 或另开一个不启用端点级收消息的端点（§6.4 末段）。
  *
  * 「什么都不做」与「保存句柄」都会导致回调返回后回收——库无法观测外部变量。
  * 同步 iocomm_conn_send 在回调内会返回 WOULD_DEADLOCK，需在别的线程调用。 */
@@ -835,7 +886,18 @@ transport 不支持 → `NOT_SUPPORTED`；其余同 `iocomm_connect`（`INVALID_
  * 在 accept 回调内调用后，该连接不再被自动回收，调用方可在其他线程
  * 对它调用 iocomm_conn_recv。**幂等**：对同一连接重复调用返回 ICOMM_OK，
  * 连接只有一个「C 侧所有权」。持有不与订阅冲突——但订阅与 recv 的
- * 二选一规则（§6.4）照常适用。 */
+ * 二选一规则（§6.4）照常适用。
+ *
+ * **可在任意线程调用，含 accept 回调内**（2026-11-05，N-36）：它只改所有权表，
+ * 不等待、不投递、不阻塞 ⇒ 矩阵（§3.2.1）里**没有** WOULD_DEADLOCK / TIMEOUT。
+ * **retain 之后在回调外调 `conn_subscribe` 合法**（2026-11-05，N-41，与 ADR-002 的
+ * 「`retain` 之后订阅是合法需求」一致）——两者是不同通道：retain 决定「谁持有」，
+ * subscribe 决定「消息怎么送」，互不取消；但**订阅与 recv 的二选一照常适用**。
+ *
+ * **已由端点级推送/拉取持有的连接**（2026-11-05，N-38）：本函数只做所有权确认，
+ * 返回 OK，**不改变投递路由**——消息仍在端点接收队列，`conn_recv` 对该连接返回
+ * `INVALID_STATE`。详见 §5.2「端点级持有」。
+ * **并发**：同一连接并发调 `conn_retain` 是安全的（幂等，内部串行化），返回码只取决于该连接是否有效。 */
 int32_t iocomm_conn_retain(iocomm_runtime_t rt, iocomm_conn_t conn,
                            iocomm_error* err);
 
@@ -921,8 +983,9 @@ int32_t  iocomm_conn_get  (iocomm_runtime_t rt, iocomm_endpoint_t ep,
 > **交付时点**：本借用的起点是「双向 HELLO 完成」，不是「TCP 建立」——握手期的连接由库内部持有，
 > 无 `iocomm_conn_t` 句柄、不占 `max_handles`、对应用不可见（见上方 `iocomm_accept_fn` 注释与 [线格式 §5](wire-format.md)）。
 > 这与借用语义自洽：回调返回即收回的是**已经完成握手、可以正常收发的连接**，不存在「借出一个还不能用的连接」的窗口。
-> `accept` 回调拿到的 `inbound` **只在回调期间有效**；回调返回时若库没有观测到任何持有动作，
-> 连接被自动收回并以 FIN 优雅关闭。持有动作有**三种**：**显式 `conn_retain`**、**隐式
+> `accept` 回调拿到的 `inbound` **只在回调期间有效**；**全部** `accept` 回调返回后若库仍没有观测到任何持有动作，
+> 连接被自动收回并以 FIN 优雅关闭（**任一**回调完成持有即保留——同一端点可注册多个 accept 回调，
+> 它们按注册顺序各触发一次，生命周期判定在全部跑完后进行；见 AC-33）。持有动作有**三种**：**显式 `conn_retain`**、**隐式
 > `conn_subscribe`**、以及**端点级持有**——该监听端点已注册 `iocomm_subscribe(ep)` 或
 > `endpoint_recv(ep)` 时，端点在**交付的同一时刻**接管它接入的入站连接（交付前是库的内部会话，见下方交付时点；机制见 §6.4）。
 > `conn_send_async` 不是所有权开关——「发一条拒绝就走」用
@@ -1215,8 +1278,9 @@ typedef struct iocomm_message {
 
 /* 订阅推送。ep 是**本地监听端点**，接收其**全部入站成员连接**的消息。
  * **端点级持有（唯一口径，2026-11-03 N-02）**：在该端点启用本订阅（或 `endpoint_recv(ep)`）后，
- * 该端点接入的入站连接在**交付的同一时刻**由端点接管，**不再需要（也不会）在 accept 回调内
- * 调 `conn_retain` / `conn_subscribe`**；`accept` 回调本身仍会触发，仅用于观测新连接。
+ * 该端点接入的入站连接在**交付的同一时刻**由端点接管，**不再需要**在 accept 回调内
+ * 调 `conn_retain` / `conn_subscribe`——**但调了也不报错**：`conn_retain` 返回 `OK`（只确认所有权，
+ * 不改路由），`conn_subscribe` 返回 `INVALID_STATE`（已由端点持有）。见 §6.4 `@special` 与 AC-119；`accept` 回调本身仍会触发，仅用于观测新连接。
  * 未注册 `endpoint_accept` 时，入站连接同样由本订阅隐式持有并正常投递——
  * 这是「只读端点、不关心单条连接」的服务端主用法。
  * 与 `conn_subscribe` 的关系：端点级订阅对**此后接入**的成员连接生效；
@@ -1243,10 +1307,18 @@ int32_t iocomm_unsubscribe(iocomm_runtime_t rt, iocomm_subscription_t sub,
 
 /* 拉取式接收（与 subscribe 二选一，见 §6.4）。
  * 端点级 recv 的隐式持有规则与 `iocomm_subscribe(ep)` 相同（见上）：
- * 启用后，该端点的入站连接在**交付时**由端点接管，消息进入**端点接收队列**。 */
+ * 启用后，该端点的入站连接在**交付时**由端点接管，消息进入**端点接收队列**。
+ * **成员连接的 `conn_recv` 不可用**（2026-11-05，N-38）：这些连接的消息在端点队列里，
+ * 对它们调 `conn_recv` **立即返回** `ICOMM_ERR_INVALID_STATE`（**不等待** `timeout_ms`；与 §6.4
+ * 「先 subscribe 再 recv」同码）；`conn_retain` 对此**不改变路由**。
+ * **与 `WOULD_DEADLOCK` 的优先级**：两者同时成立时（loop 线程 + 已由端点持有）**返回 `INVALID_STATE`**——
+ * 它是**静态前置条件**检查，先于线程检测（与 §3.2.1「参数校验先于其它」同序）。 */
 int32_t iocomm_endpoint_recv(iocomm_runtime_t rt, iocomm_endpoint_t ep,
                              iocomm_message* out, uint64_t timeout_ms,
                              iocomm_error* err);
+/* `conn_recv` 的**前置条件**：该连接尚未启用 `conn_subscribe`、且**未由端点级收消息持有**
+ * （否则返回 `INVALID_STATE`，见上方与 §6.4）。它**等待至多 `timeout_ms`**，超时返回 `TIMEOUT`；
+ * 在 loop 线程调用返回 `WOULD_DEADLOCK`。 */
 int32_t iocomm_conn_recv(iocomm_runtime_t rt, iocomm_conn_t conn,
                          iocomm_message* out, uint64_t timeout_ms,
                          iocomm_error* err);
@@ -1256,6 +1328,19 @@ void iocomm_message_release(iocomm_message* msg);
 ```
 
 ### 6.4 拉取与推送的互斥规则
+
+> **正交性：`endpoint_accept` 不受本节约束**（2026-11-05，N-37）。
+> `iocomm_endpoint_accept` 只注册「**新入站连接的交付**」回调，与「**已建立的连接怎么收消息**」
+> （`iocomm_subscribe(ep)` / `iocomm_endpoint_recv(ep)` / `conn_subscribe` / `conn_recv`）是**两条正交的轴**，
+> **没有互斥关系，可任意顺序注册**。行业口径一致：Asio 的 `async_accept` + `async_read`、Netty 的
+> `ChannelInboundHandler` + `read()`、OPC UA 的 Publish 与 Read 都分成两条轴，而非二选一。
+>
+> **对同一端点重复注册 `endpoint_accept` 合法**：每次返回各自的订阅句柄，交付时全部回调
+> **按注册顺序各触发一次**。
+>
+> 本节下面的「二选一」**只约束接收对象本身**（同一个端点的推送与拉取、同一条连接的推送与拉取）。
+> 历史注记：矩阵曾把 `endpoint_accept` 与 `iocomm_subscribe` 写在同一条错误码行内，
+> 该写法已废止——`endpoint_accept` 不再返回 `INVALID_STATE`（§3.2.1）。
 
 同一个接收对象（端点或连接）上，`subscribe` 与 `recv` **二选一**：
 
@@ -1269,6 +1354,13 @@ void iocomm_message_release(iocomm_message* msg);
 > 入站成员连接的消息默认进入**端点接收队列**（这是 `endpoint_recv` / `iocomm_subscribe(ep)` 的来源）；
 > 只有通过 `conn_subscribe` / `conn_retain` **单独接管**的连接，其消息才改进入**该连接的接收队列**
 > （由 `conn_recv` 消费），且该连接不再参与端点级投递。二者互斥，不会双投。
+>
+> **路由在「端点级持有」成立那一刻即定死**（2026-11-05，N-38）：该端点已启用
+> `iocomm_subscribe(ep)` / `endpoint_recv(ep)` 时，其入站连接在交付时点就由端点接管，
+> 此后对该连接调 `conn_retain` **只确认所有权、不改路由**（返回 `OK`，消息仍进端点队列，
+> `conn_recv` 返回 `INVALID_STATE`）；调 `conn_subscribe` 同样返回 `INVALID_STATE`。
+> 上表「单独接管」指的是**端点级收消息未启用**时的 `conn_subscribe` / `conn_retain`——
+> 那种情况下由它们把连接从「无消费者」状态接出来并绑定到连接接收队列。
 
 > 这条规则消除了「谁消费、是否双投、背压如何合并」的歧义。若确实需要两种消费方式，请使用**两个不同的端点/连接**。
 
@@ -1287,16 +1379,36 @@ void iocomm_message_release(iocomm_message* msg);
          违反一律返回 ICOMM_ERR_WOULD_DEADLOCK，**而不是死锁**。
 @special 以下调用**允许**，但语义特殊：
          - `unsubscribe(本订阅)`         → ICOMM_OK；本次回调跑完后不再触发
-         - `conn_destroy(本回调的 conn)` → ICOMM_OK（accept 回调内为拒绝；订阅回调内为关闭）
+         - `conn_destroy(本回调的 conn)` → ICOMM_OK（accept 回调内为拒绝；订阅回调内为关闭）。
+                                           **多次 accept 注册时**：若 A 回调内 destroy 了连接，**其后尚未执行的
+                                           accept 回调不再触发**（连接已不在，交付序列终止）；已触发的回调不受影响。
+                                           2026-11-05，N-37
          - `send_cancel`                 → 允许；**取消已完成的 op 返回 `NOT_FOUND`，不会再触发 `on_done`**
                                            （「恰好一次」是硬约束，不允许在 on_done 内取消自己导致第二次回调）
          - `monitor_close`               → 允许（监控回调不存在，故仅 on_done 场景）
          - `discovery_stop`              → 允许；本次 discovery 回调跑完后停止
          - `runtime_wakeup`              → 允许
+         - `conn_retain` / `conn_subscribe` → 允许，**不返回** `WOULD_DEADLOCK`。
+                                           **若该端点已启用端点级收消息**，两者的行为**不同**：
+                                           `conn_retain` **只做所有权确认、返回 `OK`、不改投递路由**（消息留端点队列）；
+                                           `conn_subscribe` **返回 `INVALID_STATE`**（该连接已由端点持有，见矩阵与 §5.2）。
+                                           **若未启用**，`conn_retain` 把投递切到**该连接的**接收队列、`conn_subscribe` 把消息改走订阅回调——
+                                           这是「接管」的正常语义。
+         - `endpoint_accept` / `conn_condition_subscribe` / `endpoint_condition_subscribe`
+                                         → 允许（注册类入口，非阻塞、同步生效；同样**不返回** `WOULD_DEADLOCK`。
+                                            线程口径见架构 §3.3——它们与 `subscribe` 同级，须串行化或经 loop 线程调用）
          - 任何**异步**发送 / 连接            → 允许（内部投递到 loop）
 @except  `iocomm_accept_fn` 的 inbound 句柄**可以**在回调内 conn_destroy
          （用于拒绝入站连接），不返回 WOULD_DEADLOCK
-@allow   回调内允许：读取快照、发起异步操作、创建新的端点/连接
+@allow   回调内允许：读取快照、发起异步操作、**创建端点与异步连接**（`endpoint_create` / `iocomm_connect_async` / `iocomm_connect_node_async`）。
+         **同步 `iocomm_connect` / `iocomm_connect_node` 不在其列**——它们是阻塞型调用，属上面的 `@forbid`（返回 `WOULD_DEADLOCK`）。
+         **为什么允许在回调内建端点**（2026-11-05，N-49）：曾被收窄为「仅连接」，理由是
+         「回调内建的端点在本轮内无合法销毁途径、会泄漏」——**该理由不成立**：`@forbid` 只约束
+         **回调执行期间**，回调返回后随时可 `endpoint_destroy`，没有泄漏。收窄反而制造了
+         「不在 `@forbid`、矩阵也无对应码」的三不管状态，故**维持允许**。
+         **注意**：`endpoint_create` 是**非阻塞型**调用，在 loop 线程**合法**（不受 FR-6.7 约束）。
+         **可重入**：同一回调内连调两次 `endpoint_create` 合法；**但在本回调内新建的端点不能在本回调内销毁**
+         （`endpoint_destroy` 属 `@forbid`）——请在本轮回调返回之后再销毁。
 @on_destroy
          Runtime 销毁时，所有尚未触发的异步回调**恰好以 CANCELLED 触发一次**。
          已在执行中的回调会先跑完，再销毁。
@@ -1313,6 +1425,12 @@ void iocomm_message_release(iocomm_message* msg);
 ---
 
 ## 7. 发现
+
+> **v1 是单发现域**（2026-11-05，N-44）：组播组地址与 UDP 端口**不可配置**（见 [线格式 §8.1](wire-format.md)），
+> 因此同网段内所有启用发现的 Runtime 互相可见。**本结构体没有、v1 也不会加入** `domain_id` / `multicast_addr` 字段。
+> 需要互不可见的通信域请在部署层用 **VLAN / 交换机 ACL / 独立网卡 / netns**；**域 ≠ 安全边界**（v1 无认证无加密，需求 §4.1）。
+> 关闭组播（`enable_multicast = 2`）+ 配置 seed **不是**分域手段——对端仍可单播找到本端。
+
 ```c
 typedef struct iocomm_discovery_config {
     iocomm_abi_header hdr;
@@ -1444,7 +1562,29 @@ struct iocomm_peer_status {
 
 #define ICOMM_PEER_STATUS_INIT { sizeof(iocomm_peer_status), 0 }
 
-/* FR-5.2：状态变化可订阅（适用于 conn 或 endpoint） */
+/* FR-5.2：状态变化可订阅（适用于 conn 或 endpoint）。
+ *
+ * **连接级**（`iocomm_conn_condition_subscribe`）：只报该连接自身的条件集变化。
+ *
+ * **端点级**（`iocomm_endpoint_condition_subscribe`，2026-11-05 定，N-45 / AC-121）：
+ * = 对「**当前与未来全部成员连接**」条件集变化的聚合，语义等价于对每个成员连接各订阅一次，
+ * 但**只产生一个订阅句柄**（`unsubscribe` 一次即覆盖全部）。
+ *   - **新成员自动纳入**：交付时点之后接入的成员连接自动进入订阅范围，
+ *     **不需要**在 `endpoint_accept` 回调里补订阅；
+ *   - **成员离开**（2026-11-05 补全，N-45）：该连接的**状态变化本身照常推送**——包括最后一次
+ *     `connected = FALSE`（与逐连接订阅完全等价），**推送先于**它从成员集合中摘除；
+ *     摘除之后不再为它投递。**不额外推送**「成员离开」这种**独立事件**——上线由 `endpoint_accept` 观测、
+ *     节点上下线由 `discovery` 的 JOINED/LEFT 观测，这里再推一遍会形成第三套重复通道。
+ *     **注意「上线」的观测渠道按成员类型分**：**入站**成员上线由 `endpoint_accept` 观测；
+ *     **`ep_owner == ep` 的出站成员**不经过 accept，其上线由 `iocomm_connect*` 的返回 / `on_done(OK)` 观测；
+ *   - **成员定义** = 与 FR-8.6 的扇出集合**完全一致**：该端点的全部入站成员连接 + `ep_owner == ep` 的出站连接；
+ *   - **端点没有自身状态**：回调的 `conn` 与 `ep` **恒非 0**，永不以 `conn == 0` 触发；
+ *   - 与消息接收通道**无关**：不受 §6.4 的 `subscribe` / `recv` 二选一约束（矩阵见 §3.2.1）。
+ *
+ * **是否在订阅建立时立刻推一次当前值**：与**连接级** `iocomm_conn_condition_subscribe` 取**同一口径**——
+ * 两级是同一条规则（2026-11-05 复核后再无悬空）。在连接级的该口径写死之前，调用方应先用
+ * `iocomm_conn_status` 取初始值、只依赖**变化**推送；AC-121 也只断言变化。
+ */
 typedef void (*iocomm_condition_fn)(void* user, iocomm_conn_t conn,
                                     iocomm_endpoint_t ep,
                                     const iocomm_peer_status* st);
@@ -1491,9 +1631,16 @@ int32_t iocomm_stats_snapshot(iocomm_runtime_t rt, iocomm_stats* out,
  * v1 结构（FR-5.5；验收 AC-94）：
  *   { "version": 1,
  *     "connections": [ { "conn": <u64>, "peer_node_id": <u64>, "connected": <bool>,
- *                        "send_queue_depth": <i64>, "recv_queue_depth": <i64> }, ... ],
- *     "endpoints":   [ { "ep": <u64>, "name": <string>, "conn_count": <u32> }, ... ] }
+ *                        "recv_queue_depth": <i64> }, ... ],
+ *     "endpoints":   [ { "ep": <u64>, "name": <string>, "conn_count": <u32>,
+ *                        "send_queue_depth": <i64> }, ... ] }
+ * `send_queue_depth` **在端点对象里**（2026-11-05，N-40）：成员连接共用该端点的一条发送队列
+ *   （§6.1「队列归属规则」），逐连接无定义。**例外**：`ep_owner == 0` 的出站连接各自一条发送队列（§6.1 同一清单末项），
+ *   它们**不在任何端点**下，其发送队列深度**不出现在本 dump 中**——这是 v1 的已知盲区，
+ *   记入 [open-questions N-47](../open-questions.md) 随 per-connection 指标一并评估。
+ * `recv_queue_depth` 每连接一条（§6.1），故留在 `connections` 里。
  * 键名与类型属**契约**；新增键只允许在顶层与对象内追加（读取方忽略未知键）。
+ * **例外（2026-11-05，N-40）**：`send_queue_depth` 从 `connections[]` **移到** `endpoints[]`，属**一次性的破坏性字段搬移**，不适用「只追加」规则——本库尚未发布（M0 未冻结），无兼容负担；**发布后**再要搬移字段就必须升 ABI major。
  * 「最后 N 条错误」属 v1.1（FR-5.5b）。 */
 int32_t iocomm_diagnostic_dump(iocomm_runtime_t rt, char** out_text,
                                uint64_t* out_len, iocomm_error* err);
@@ -1928,6 +2075,13 @@ struct iocomm_audit_record {
 | 库内字段级过滤 / 内容审计 | 没有数据格式 |
 | 替代 Wireshark / PRONETA | 超出通信层职责 |
 | 宣称「满足 IEC 62443」 | 标准要求的是安全事件可审计，不是业务载荷留存 |
+| **跨进程 / 集中式监控**（2026-11-05，N-42） | 监控作用域 = 本 Runtime；管理进程须在每进程内各嵌 Runtime 自行汇总。**v2 评估** |
+| **事件循环投递入口（`post` 类）**（2026-11-05，N-43） | 回调内做异步发送 + 置标志、数据处理放 `run_once` 之后即可覆盖；**v2 评估** |
+| **多通信域 / 网络级分区**（2026-11-05，N-44） | 单发现域；硬隔离用 VLAN / ACL / 独立网卡 / netns。**域 ≠ 安全边界**；v2 与 TLS 同批评估 |
+
+> **跨进程监控的替代做法**（v1）（2026-11-05，N-42）：本库不提供跨进程指标通道，但调用方仍可：
+> ① 在各进程内用 `monitor_open(rt, ep=0)` + `monitor_poll` 自行聚合；② 用 `iocomm_diagnostic_dump` 取 JSON 快照
+> （作用域仍是本 Runtime）；③ 经应用自有通道（如共享内存、MQ）汇总到管理进程。**库不代劳，但也不阻止**。
 
 > **信任模型（v1）**：任何持有 `iocomm_runtime_t` 的调用方都可以用 `ep=0` 打开监控读取全部消息元数据。
 > v1 **信任同进程调用方**；跨进程/多租户隔离留到 v2。

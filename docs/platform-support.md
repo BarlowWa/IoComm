@@ -127,6 +127,7 @@ readelf --version-info libiocomm.so | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail 
 | **版本碎片化**（麒麟 SP1/SP2/SP3；UOS 1050/1060/1070 + A/D/E 底座） | 支持矩阵细化到「产品 + SP + 内核 + glibc」 |
 | **KYSEC 安全模块** | 白名单流程；优先 socket/pipe，不用 SysV IPC |
 | **默认 `nofile=1024`** | 显式 `LimitNOFILE`（systemd） |
+| **默认临时端口段 `32000–60999` 覆盖发现端口**（2026-11-05，N-48） | 发现用的组播 `47377` 与单播段 `47378–47477` **落在 Linux 默认临时端口区间内**（内核文档 `ip_local_port_range` 示例即 `32000 60999`；Windows/macOS 为 `49152–65535`，在其外）。启动顺序不利时内核可能已把该端口分配给出站 socket → `discovery_start` 因 `bind` 失败返回 `RESOURCE_EXHAUSTED`。**缓解**：部署时用 `sysctl -w net.ipv4.ip_local_reserved_ports=47377-47477` **保留**该段，并让发现先于大量出站连接启动 |
 | **`/tmp` 1–3 天清理** | socket 文件放 `/run`，不放 `/tmp` |
 | **debuginfo 不可得** | 采购时索取 `kernel-devel` / `kernel-debuginfo` / SRPM |
 | **国产网卡驱动** | 不假设多队列/RSS；提供单队列退化；启动时输出 `ethtool` 自检 |

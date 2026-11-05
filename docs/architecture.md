@@ -109,7 +109,7 @@ manual 模式下**只有一个宿主线程**在驱动 loop。因此：
 
 | 情形 | 行为 |
 |---|---|
-| 在 **loop 驱动线程**上调用同步 API | **返回 `ICOMM_ERR_WOULD_DEADLOCK`**，不阻塞 |
+| 在 **loop 驱动线程**上调用**阻塞型**同步 API | **返回 `ICOMM_ERR_WOULD_DEADLOCK`**，不阻塞。**非阻塞的所有权 / 注册类调用不受此限**（`conn_retain` / `conn_subscribe` / `endpoint_accept` / 两个 `*_condition_subscribe` / `runtime_wakeup` 在 loop 线程上合法）——见 §3.3 与 C ABI §6.4 `@special` |
 | 在**其他线程**上调用同步 API | 允许；该线程阻塞等待，loop 线程继续推进 |
 | manual 模式下 `runtime_drain` | **不接受阻塞调用**——传入 `timeout_ms = 0`，在外部循环里交替调 `run_once` 与 `drain`，**直到 `drain` 返回 `ICOMM_OK`**（判据是 `drain` 的返回值；`run_once` 空闲返回 `TIMEOUT`，不能拿它当完成信号） |
 | **manual 模式建连** | **必须用 `iocomm_connect_async` / `iocomm_connect_node_async`**；同步 `iocomm_connect` 在 loop 线程上会返回 `WOULD_DEADLOCK` |
@@ -124,20 +124,42 @@ manual 模式下**只有一个宿主线程**在驱动 loop。因此：
 
 | 对象 | 线程安全 |
 |---|---|
-| `Runtime` / 端点 / 连接 / 订阅的**创建与销毁** | 否（调用方串行化） |
+| `Runtime` / 端点 / 连接 / 订阅的**创建与销毁** | 否（调用方串行化）。**注意**：本行指**对象生命周期**；下文单独列出的注册类入口（`endpoint_accept` / 两个 `*_condition_subscribe`）另有属性 |
 | `run_once` / `run_for` | 否（仅 loop 线程）。**`run_once` 返回 `TIMEOUT` = 本轮空闲**（正常事件，非故障，C ABI §4） |
 | 端点/连接/订阅的 `count/get` | 否（loop 线程或串行化） |
 | `*_send_async` / `connect*_async` / `runtime_wakeup` | **是**（内部投递到 loop） |
-| `conn_send` / `endpoint_send` / `*_recv` / `unsubscribe`（同步） | 否（一句柄一线程；loop 线程调用返回 `WOULD_DEADLOCK`） |
+| `conn_send` / `endpoint_send` / `*_recv` / `unsubscribe`（同步） | 否（一句柄一线程；loop 线程调用返回 `WOULD_DEADLOCK`。**唯一例外**：在**本订阅自己的回调内**用 `unsubscribe` 取消本订阅 → `ICOMM_OK`，见 C ABI §6.4 `@special` 与 AC-5） |
 | `runtime_reconfigure` | **是**（内部投递到 loop，异步生效） |
-| `subscribe` / `conn_subscribe` / `discovery_start` / `discovery_stop` | 否（调用方串行化，或经 `run_once` 线程调用） |
-| 指标快照 `iocomm_stats_snapshot` / `conn_status` / `monitor_get_stats` | **是**（返回拷贝） |
+| `subscribe` / `conn_subscribe` / `endpoint_accept` / `conn_condition_subscribe` / `endpoint_condition_subscribe` / `discovery_start` / `discovery_stop` | 否（调用方串行化，或经 `run_once` 线程调用——**含回调内**；见下方「注册类入口」）——2026-11-05，N-39 |
+| `conn_retain` | **是**（只改所有权表，不等待、不投递）——2026-11-05，N-36 |
+| 指标快照 `iocomm_stats_snapshot` / `conn_status` / `monitor_get_stats` / `diagnostic_dump` | **是**（返回拷贝） |
 | `monitor_poll` / 载荷查询 / `monitor_dump` / `monitor_close` | 否（同一 monitor 单线程串行；SPSC 消费端） |
 | `monitor_open` / `capture_set` | **是**（内部加锁或投递到 loop） |
 
+> **默认规则**（2026-11-05，N-39）：**本表未列出的入口默认非线程安全**（与 libuv 的惯例一致）。
+> 「**是**」表示内部投递到 loop 或加锁，「否」表示须调用方串行化或仅在 loop 线程调用。
+> **例外**：若某函数的头文件注释**明确写了**「任意线程可调用」（如 `runtime_node_id` / `conn_destroy` /
+> `endpoint_destroy` / `monitor_get_stats`），**以注释为准**——本默认规则只覆盖「既未在本表、注释也没写」的入口。
+>
+> **注册类入口（`endpoint_accept` / 两个 `*_condition_subscribe`）为什么是「否」而不是「是」**（2026-11-05，N-39 复核）：
+> 它们要求**同步生效**（返回时订阅已登记，随后的 `connect` 不会漏交付），这与「内部投递到 loop」矛盾。
+> 若改为「内部加锁 + 同步生效」，则**在 loop 线程（含回调内）调用会自己取到自己持有的锁**——
+> 要么自锁，要么返回矩阵未列的码。故归入与同族 `subscribe` / `conn_subscribe` **完全一致**的口径：
+> **调用方串行化，或在 loop 线程上调用**（loop 线程调用合法且是内联执行，不会自锁）。
+> 代价是「另一线程注册」不可用——与 `subscribe` 的既有代价相同，不是新增限制。
+> `conn_count` / `conn_get` 属「否」——外部监控线程若需枚举连接，应把枚举放进 loop 线程
+> （manual 模式下就是驱动 `run_once` 的那个线程），或按 `open-questions.md` **N-46** 的裁决改用快照 API。
+
 > **异步发送与句柄销毁的竞态**：异步发送只接收**连接句柄或端点句柄**，内部先做代际校验再入队；调用方必须保证「不再对某对象发起异步操作之后」才销毁它。文档写死这条顺序，**不做隐式同步**——与 ZeroMQ / Asio 的惯例一致。
 
-> **线程检测的生产语义**：`WOULD_DEADLOCK` 是**生产行为**，不是调试断言。实现方式是：Runtime 在首次 `run_once`（manual）或启动 IO 线程（owned）时记录 loop 线程 ID；该 ID 在 `stop` 前保持不变，所有同步入口比对它。首次 `run_once` 之前 loop 线程未确定，同步 API 允许调用（此时不可能有在途操作）。
+> **线程检测的生产语义**：`WOULD_DEADLOCK` 是**生产行为**，不是调试断言。实现方式是：Runtime 在首次 `run_once`（manual）或启动 IO 线程（owned）时记录 loop 线程 ID；该 ID 在 `stop` 前保持不变。
+> **比对范围 = 矩阵里列了 `WOULD_DEADLOCK` 的那些入口**（阻塞型同步 API：`conn_send` / `endpoint_send` / `*_recv` / `connect` / `conn_close_graceful` / `unsubscribe` / `monitor_poll` / `runtime_stop`（`timeout_ms > 0`）/ `*_destroy` / `conn_abort` 等）。
+> **不比对**的是非阻塞注册类入口（`endpoint_accept` / 两个 `*_condition_subscribe` / `conn_subscribe` / `subscribe`）与 `conn_retain`——
+> 它们标「否」的含义是「**调用方须串行化**」：违反时行为**未定义**——库不保证检测、不保证崩溃、不保证返回某个码（与 libc 的非线程安全函数同口径）。
+> 注意这与 FR-1.6「句柄失效绝不 UB」**不冲突**：那条讲的是**句柄有效性**（库必须返回 `STALE_HANDLE`），
+> 这里讲的是**线程亲和性**（调用方违反了 `@thread` 约定，库无义务兜底）。
+> 而不是「在 loop 线程外调用会返回 `WOULD_DEADLOCK`」。**本表未列 `WOULD_DEADLOCK` 的，就不要指望库替你检测。**
+> 首次 `run_once` 之前 loop 线程未确定，同步 API 允许调用（此时不可能有在途操作）。
 
 ---
 
@@ -251,7 +273,7 @@ NodeId = u64
 | **conn** | 一条双向连接 | **点对点** | 该连接 |
 | **subscription** | 推送回调的注册 | — | — |
 
-**入站连接**由 `iocomm_endpoint_accept()` 注册的回调交付（**双向 HELLO 完成后才触发**，见 §5.2b）。回调内的句柄是**借用**：只在回调期间有效。持有动作有**三种**——**显式 `conn_retain`**（拉取）、**隐式 `conn_subscribe`**（推送，订阅即所有权），以及**端点级持有**（该端点已启用 `iocomm_subscribe(ep)` / `endpoint_recv(ep)` 时，入站连接在**交付的同一时刻**由端点接管，回调内无需再表态）；三者都不做则回调返回时自动收回并以 FIN 优雅关闭。「发完即关」用发送选项 `ICOMM_SEND_CLOSE_AFTER`，`conn_send_async` 本身不是所有权开关。完整契约见 C ABI §5.2 与 [ADR-002](adr/ADR-002-message-addressing-and-ownership.md)。
+**入站连接**由 `iocomm_endpoint_accept()` 注册的回调交付（**双向 HELLO 完成后才触发**，见 §5.2b）。同一端点可注册**多个** accept 回调，按注册顺序各触发一次；持有动作只需在**任一**回调内完成，生命周期判定在**全部**回调跑完后进行（2026-11-05，N-37；见 C ABI §6.4 与 AC-33）。回调内的句柄是**借用**：只在回调期间有效。持有动作有**三种**——**显式 `conn_retain`**（拉取）、**隐式 `conn_subscribe`**（推送，订阅即所有权），以及**端点级持有**（该端点已启用 `iocomm_subscribe(ep)` / `endpoint_recv(ep)` 时，入站连接在**交付的同一时刻**由端点接管，回调内无需再表态）；三者都不做则回调返回时自动收回并以 FIN 优雅关闭。「发完即关」用发送选项 `ICOMM_SEND_CLOSE_AFTER`，`conn_send_async` 本身不是所有权开关。完整契约见 C ABI §5.2 与 [ADR-002](adr/ADR-002-message-addressing-and-ownership.md)。
 
 > **成员资格（2026-11-03，N-01 / N-03）**：入站连接**在交付（双向 HELLO 完成）时**被持有即成为监听端点的**成员**，参与 `endpoint_send` 扇出与 `conn_count(ep)`，与 `ep_owner == ep` 的出站成员连接地位相同。**握手期的内部会话不在此列**（无句柄、不计入扇出与计数）。**纯服务端（只 accept 不 connect）因此可以对全部入站连接做一次扇出广播。** 此前「入站连接不归属端点、不参与扇出」的规定已废止——它使服务端广播不可用，且与本节 `endpoint` 行自相矛盾。
 
@@ -384,6 +406,11 @@ Message {
 - 重连：**Full jitter 退避**（`random(0, min(cap, base*2^n))`），cap 10–30s。
 
 ### 6.3 发现
+
+> **v1 是单发现域**（2026-11-05，N-44）：组播组 `239.255.73.77` + 端口 `47377` 硬编码，**同网段内所有启用发现的
+> Runtime 互相可见**。需要两个互不可见的通信域时，请在部署层用 **VLAN / 交换机 ACL / 独立网卡 / netns**，
+> 不要依赖「分组播组」（不可配置）。**域 ≠ 安全边界**——v1 无认证无加密（需求 §4.1）。
+> 本机名字锁（§6.4）是机器级的，同样不构成网络边界。DDS / ROS 2 的 `domain_id` 方案可作为 v2 的参考。
 
 **两阶段**（借鉴 DDS）：
 
@@ -571,9 +598,9 @@ enum ErrorCode {
 | # | 里程碑 | 产出 | 验收 |
 |---|---|---|---|
 | **M0** | 骨架 | C ABI 头（C99 可编译）+ crate 划分 + CI 三平台构建 | AC-P1 / AC-P5 / AC-18 / AC-24 / AC-35 / AC-95 |
-| **M1** | inproc 闭环 | 句柄表（代际）+ Runtime + 端点/连接模型 + **跨进程名字表（§6.4）** + **端点名格式/长度校验（§c-abi 5.1a）** + **手动驱动语义（`run_once` / `run_for`）** + `inproc` 传输（FR-3.5–3.10） | AC-4 / AC-11 / AC-25 / AC-32 / AC-33 / AC-36 / AC-40 / AC-80 / AC-81 / AC-82 / AC-83 / AC-84 / AC-89 / AC-100 / AC-102 / **AC-108** / **AC-109** / **AC-111** / **AC-114** / **AC-115** / **AC-116** |
-| **M2** | TCP + 双向 | tcp 传输 + accept + connect + send/recv/subscribe + 异步排队超时 + **[线格式](api/wire-format.md)（HELLO 握手 · ERROR 帧 · 尺寸协商）** + **端点级套接字参数（`TCP_NODELAY` / backlog）** | AC-1 / AC-2 / AC-10 / AC-29 / AC-30 / AC-31 / AC-33b / AC-39 / AC-73 / AC-74 / AC-75 / AC-76 / AC-77 / AC-78 / AC-90 / AC-92 / AC-99 / AC-103 / AC-104 / **AC-106** / **AC-110** / **AC-112** / **AC-113** |
-| **M3** | 状态与监控 | 心跳 + 条件集 + 指标 + 诊断（JSON 结构见 AC-94）+ **消息监控（信封级）** + **自动重连语义** | AC-3 / AC-5 / AC-6 / AC-12 / AC-13 / AC-15 / AC-20 / AC-27 / AC-28 / AC-37 / AC-41 / AC-42 / AC-43 / AC-44 / AC-45 / AC-53 / AC-55 / AC-57 / AC-59 / AC-64 / AC-68 / AC-71 / AC-72 / AC-86 / AC-91 / AC-94 / AC-101 / **AC-105** |
+| **M1** | inproc 闭环 | 句柄表（代际）+ Runtime + 端点/连接模型 + **跨进程名字表（§6.4）** + **端点名格式/长度校验（§c-abi 5.1a）** + **手动驱动语义（`run_once` / `run_for`）** + `inproc` 传输（FR-3.5–3.10） | AC-4 / AC-11 / AC-25 / AC-32 / AC-33 / AC-36 / AC-40 / AC-80 / AC-81 / AC-82 / AC-83 / AC-84 / AC-89 / AC-100 / AC-102 / **AC-108** / **AC-109** / **AC-111** / **AC-114** / **AC-115** / **AC-116** / **AC-120** |
+| **M2** | TCP + 双向 | tcp 传输 + accept + connect + send/recv/subscribe + 异步排队超时 + **[线格式](api/wire-format.md)（HELLO 握手 · ERROR 帧 · 尺寸协商）** + **端点级套接字参数（`TCP_NODELAY` / backlog）** | AC-1 / AC-2 / AC-10 / AC-29 / AC-30 / AC-31 / AC-33b / AC-39 / AC-73 / AC-74 / AC-75 / AC-76 / AC-77 / AC-78 / AC-90 / AC-92 / AC-99 / AC-103 / AC-104 / **AC-106** / **AC-110** / **AC-112** / **AC-113** / **AC-117 / AC-118 / AC-119** |
+| **M3** | 状态与监控 | 心跳 + 条件集 + 指标 + 诊断（JSON 结构见 AC-94）+ **消息监控（信封级）** + **自动重连语义** | AC-3 / AC-5 / AC-6 / AC-12 / AC-13 / AC-15 / AC-20 / AC-27 / AC-28 / AC-37 / AC-41 / AC-42 / AC-43 / AC-44 / AC-45 / AC-53 / AC-55 / AC-57 / AC-59 / AC-64 / AC-68 / AC-71 / AC-72 / AC-86 / AC-91 / AC-94 / AC-101 / **AC-105** / **AC-121** |
 | **M4** | 发现 | 组播 + 单播 seed + 节点身份 + 阶段二端点能力 + **[发现线格式](api/wire-format.md#8-发现报文阶段一--阶段二)** + **`connect_node` 地址解析** | AC-7 / AC-9 / AC-14 / AC-16 / AC-21 / AC-22 / AC-23 / AC-34 / AC-38 / AC-79 / AC-85 / AC-87 / AC-93 / **AC-107** |
 | **M5** | 本机 IPC | Linux unix socket + Windows 命名管道 | AC-P3 / AC-8 / AC-17 / AC-19 / AC-26 / AC-88 |
 | **M6** | 平台与加固 | 麒麟/UOS 实机 + glibc 2.17 基线 + soak | AC-P1 / AC-P2 / AC-P3 / AC-P4 / AC-P5 / AC-E1 / AC-E2 / AC-E3 / AC-E4 / AC-E5 / AC-E6 |

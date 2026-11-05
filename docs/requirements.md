@@ -100,10 +100,10 @@
 | 编号 | 需求 | 优先级 |
 |---|---|---|
 | FR-5.1 | 连接/节点状态（**条件集**，不是扁平枚举） | P0 |
-| FR-5.2 | 状态变化**可订阅**（不只是 `get_state()`） | P0 |
+| FR-5.2 | 状态变化**可订阅**（不只是 `get_state()`）。**两级订阅**：连接级 `iocomm_conn_condition_subscribe` 只报该连接；**端点级 `iocomm_endpoint_condition_subscribe` = 对「当前与未来全部成员连接」条件集变化的聚合**（2026-11-05，N-45）——等价于对每个成员连接各订阅一次但**只产生一个订阅句柄**；新成员**自动纳入**、不需要在 `accept` 回调里补订阅。**成员离开**：其状态变化照常推送（含最后一次 `connected = FALSE`，与逐连接订阅等价，且**推送先于**摘除），摘除后停止投递，但**不额外推送「成员离开」这类独立事件**（上线归 `endpoint_accept`，节点上下线归 `discovery`）。**成员定义 = FR-8.6 扇出集合**（入站成员 + `ep_owner == ep` 出站）。端点无自身状态，回调的 `conn` 与 `ep` **恒非 0** | P0 |
 | FR-5.3 | 应用层心跳（带序号 + 双向确认） | P0 |
-| FR-5.4 | 指标快照：吞吐 / 延迟 / 队列深度 / 丢弃 / 重连次数 / **协议错误数**（`protocol_errors`） | P0 |
-| FR-5.5 | 诊断 dump：**连接表 + 队列水位**，JSON 文本（顶层含 `"version"` 键，供格式演进） | P1 |
+| FR-5.4 | 指标快照：吞吐 / 延迟 / 队列深度 / 丢弃 / 重连次数 / **协议错误数**（`protocol_errors`）。**作用域 = 本 Runtime**（聚合值；无 per-connection 维度）——见 §4 非目标表与 [open-questions N-47](open-questions.md) | P0 |
+| FR-5.5 | 诊断 dump：**连接表 + 队列水位**，JSON 文本（顶层含 `"version"` 键，供格式演进）。**作用域 = 本 Runtime**；`send_queue_depth` 为端点级（成员连接共用端点发送队列），`recv_queue_depth` 为每连接一条 | P1 |
 | FR-5.5b | 诊断 dump：**最后 N 条错误**（需持续记录，有内存与抖动成本） | **v1.1** |
 | FR-5.6 | 控制面：启停、重配置（只动通信参数）、关闭/排空 | P0 |
 | FR-5.7 | 环境指纹日志（OS/内核/glibc/ulimit/网卡/安全模块），通过 `log_fn` 在 `runtime_start` 时输出一次 | P1 |
@@ -120,7 +120,7 @@
 | FR-6.4 | **库支持「无内部线程、调用方驱动」**（`run_once` / `run_for`）。`run_once(timeout_ms)` 驱动一轮：处理了事件返回 `OK`，纯空闲返回 `TIMEOUT`（**正常事件，非故障**），`timeout_ms = 0` 只轮询一次；`run_for(duration_ms)` = 循环 `run_once` 至累计驱动满 `duration_ms`，`0` 为空操作，**从不返回 `TIMEOUT`**（C ABI §4 为唯一权威） | P0 |
 | FR-6.5 | 也可托管运行（自带**单** IO 线程）。**AC 口径**：owned 模式下主线程不调 `run_once` 也能完成收发，且 IO 线程恒为 1。**Stopped 为终态，不可再 `start`（返回 `CLOSED`）；恢复需销毁后重建（见 AC-116）** | P0 |
 | FR-6.6 | 取消语义明确（取消后仍回调一次，带 `CANCELLED`） | P1 |
-| FR-6.7 | 在回调线程 / loop 驱动线程内调用同步 API → 返回 `WOULD_DEADLOCK`，而不是死锁 | P0 |
+| FR-6.7 | 在回调线程 / loop 驱动线程内调用**阻塞型**同步 API → 返回 `WOULD_DEADLOCK`，而不是死锁。**不适用于**非阻塞的所有权 / 注册类调用：`conn_retain`（N-36）、`conn_subscribe`、`endpoint_accept` 与两个 `*_condition_subscribe`（N-39）**在回调内合法**，见 [C ABI §6.4 @special](api/c-abi.md#64-拉取与推送的互斥规则) | P0 |
 | FR-6.8 | **同一接收对象上 `subscribe` 与 `recv` 二选一**：先设置者生效，后调用者返回 `INVALID_STATE`（实现依据：[C ABI §6.4](api/c-abi.md#64-拉取与推送的互斥规则)） | P0 |
 
 ### FR-8 远端寻址与连接
@@ -134,10 +134,10 @@
 | FR-8.5 | **入站连接必须可被应用拿到**：`endpoint_accept` 回调交付连接句柄（**借用**：仅在回调期间有效）。**交付时点**：tcp/unix/pipe 上为**双向 HELLO 完成后**（此时 `peer_node_id` 必有值、连接已可发 DATA）；inproc 为**连接建立即交付**（无 HELLO，见 FR-3.5 / 线格式 §7）。握手期的连接是内部会话，不分配句柄、不占 `max_handles`；握手失败/超时**不触发** `accept`；**交付时句柄表已满同样不触发**（连接立即 FIN，见 [C ABI §6.0](api/c-abi.md)） | P0 |
 | FR-8.6 | 发送目标语义明确：连接 = 点对点；端点 = **扇出到该端点的全部成员连接（入站 + `ep_owner == ep` 出站）** | P0 |
 | FR-8.7 | 收到消息时可从 `from` 取得来源连接，用于**回发** | P0 |
-| FR-8.8 | **入站连接的持有**：显式 `conn_retain`、隐式 `conn_subscribe`、**端点级持有**（端点已启用 `iocomm_subscribe(ep)` / `endpoint_recv(ep)`）三者之一即持有；都不做则回调返回时自动关闭（优雅 FIN）。**发送不是所有权开关**：「发完即关」用 `ICOMM_SEND_CLOSE_AFTER`（ADR-002）。**端点既无 `endpoint_accept` 回调、也无端点级订阅/拉取时，入站连接在交付时点即关闭（FIN），见 AC-114** | P0 |
+| FR-8.8 | **入站连接的持有**：显式 `conn_retain`、隐式 `conn_subscribe`、**端点级持有**（端点已启用 `iocomm_subscribe(ep)` / `endpoint_recv(ep)`）三者之一即持有；都不做则**全部** `accept` 回调返回后自动关闭（优雅 FIN；多个 accept 回调时，**任一**完成持有即保留，**任一** `conn_destroy` 则其余回调不再触发——见 AC-33 / AC-33b）。**发送不是所有权开关**：「发完即关」用 `ICOMM_SEND_CLOSE_AFTER`（ADR-002）。**端点既无 `endpoint_accept` 回调、也无端点级订阅/拉取时，入站连接在交付时点即关闭（FIN），见 AC-114** | P0 |
 | FR-8.10 | **端点销毁时的出站连接**：`ep_owner == ep` 的出站连接**继续存活**，未发项原子迁移到各自的连接队列（容量取 runtime 默认），不再计入该端点扇出 | P0 |
 | FR-8.9 | **连接的四种关闭**：`conn_destroy`（立即取消在途发送、丢弃缓冲、FIN，各回调一次 `CANCELLED`）/ `conn_close_graceful(linger_ms)`（flush 后关）/ `ICOMM_SEND_CLOSE_AFTER`（发完即关）/ `conn_abort`（RST 异常中止） | P0 |
-| FR-8.11 | **端点级接收（2026-11-03 新增）**：`iocomm_subscribe(ep)` / `iocomm_endpoint_recv(ep)` 一经启用，即**隐式持有**该端点此后的全部入站连接（accept 回调仍会触发，仅用于观测）；不注册 `endpoint_accept` 时同样可正常接收。入站消息默认进入**端点接收队列**；被 `conn_subscribe` / `conn_retain` 单独接管的连接改进入该连接的接收队列，不再参与端点级投递（不双投） | P0 |
+| FR-8.11 | **端点级接收（2026-11-03 新增）**：`iocomm_subscribe(ep)` / `iocomm_endpoint_recv(ep)` 一经启用，即**隐式持有**该端点此后的全部入站连接（**全部** accept 回调仍会触发、仅用于观测，不因端点级收消息已启用而被拒——N-37）；不注册 `endpoint_accept` 时同样可正常接收。入站消息默认进入**端点接收队列**；被 `conn_subscribe` / `conn_retain` 单独接管的连接改进入该连接的接收队列，不再参与端点级投递（不双投）。**三项补充（2026-11-05）**：① **`endpoint_accept` 与端点级收消息正交**——两轴可分可合、可任意顺序注册，`endpoint_accept` **不因 `recv` 已启用而返回 `INVALID_STATE`**（N-37 / AC-117）；② **端点级持有的那一刻路由即定死**——此后 `conn_retain` 只做所有权确认、返回 `OK` 但不改路由，对该连接 `conn_recv` 返回 `INVALID_STATE`（N-38 / AC-118）；③ 上述「单独接管」仅指**端点级收消息未启用**时的情形（N-38） | P0 |
 | FR-8.12 | **端点地址的通告值（2026-11-04 新增，N-05）**：库在发布端点能力（`ENDPOINTS` tag 与 `iocomm_endpoint_info.addr`）时，若 `listen_addr` 是通配地址（`0.0.0.0` / `[::]`）或端口为 0，则**替换为实际监听地址 + 实际端口**；实际地址仍是通配地址时，用**发送该发现报文所用 socket 的本地地址**替换。`iocomm_endpoint_local_addr()` 返回**原始监听值**（端口 0 时返回系统分配的实际端口，`0.0.0.0` 原样保留）。两者不混用：`endpoint_info.addr` = 可拨号通告值；`endpoint_local_addr()` = 本端监听事实 | P0 |
 | FR-8.13 | **监听配置的合法性（2026-11-04 新增，N-14）**：`listen_transport` 与 `listen_addr` 成对使用——**两者皆空 = 纯出站端点（合法）**；**只填 addr（transport 空）→ `INVALID_ARGUMENT`**（不猜默认传输）；**只填 transport（addr 空）→ `INVALID_ARGUMENT`**（无「监听任意地址」简写）；未知传输名 → `NOT_SUPPORTED`。判定发生在注册之前，失败不占用端点名。组合表见 [C ABI §5.1c](api/c-abi.md) | P0 |
 | FR-8.14 | **异步操作 ID 与取消（2026-11-04 新增，N-10）**：`op_id` **每 Runtime 单调分配、永不回绕**，耗尽 → `RESOURCE_EXHAUSTED`（与 `capture_id` 同口径）。该取消对已完成 / 从未分配 / **已取消过**的 `op_id` 一律返回 `NOT_FOUND`，且**不再触发** `on_done`。**`op_id` 不可跨 Runtime 使用**：判据只是目标 Runtime 自己的操作表，数值碰巧相同就会误取消对方同号操作 | P0 |
@@ -215,6 +215,9 @@
 | 不做 | 原因 |
 |---|---|
 | 数据格式 / 序列化 / schema | 需求红线 |
+| **跨进程 / 集中式监控**（2026-11-05，N-42） | 监控入口全部挂在 `iocomm_runtime_t` 上，**作用域 = 本 Runtime**。管理进程要观测被管子进程，须在每个进程内各嵌一个 Runtime 由应用自己汇总；库不提供中心守护进程或跨进程指标通道。行业先例（iceoryx 的 RouDi、OPC UA 的 `ServerDiagnosticsSummary`、ZeroMQ 的 `inproc://` monitor）均表明这需要一个**中心组件**。v2 评估 |
+| **事件循环投递入口（`runtime_post` 类）**（2026-11-05，N-43） | 回调内只做异步发送 + 置标志位，数据处理放 `run_once` 返回后即可覆盖全部「稍后再做」需求；**真正做不到的只有「回调内延迟 N ms」，而 post 也做不到**（v1 无定时器公开入口，见架构 T6）。在 C ABI 上实现需新增 6 条契约（取消语义 / `user` 生命周期 / 队列满策略 / 自我投递 / `run_for` 交互 / 销毁时未执行任务），5–8 人日。v2 评估 |
+| **多通信域 / 网络级分区**（2026-11-05，N-44） | v1 组播组 `239.255.73.77` + 端口 `47377` 硬编码，**同网段 = 单发现域**。硬隔离请用 **VLAN / ACL / 独立网卡 / 网络命名空间**——本库的名字锁是机器级、不构成网络边界，**域 ≠ 安全边界**（v1 无认证无加密，见 §4.1）。DDS / ROS 2 的 Domain ID 方案有明确的端口规划成本（`7400 + 250×domainId`，ROS 2 实测仅 0–101 与 215–232 可用）。v2 与 TLS 同批评估 |
 | **传输加密 / 认证（TLS / mTLS）—— v1 不做** | 见下方「安全边界」 |
 | **全量载荷默认落盘 / 内容级审计** | 见 FR-10：载荷捕获默认关闭，且不做字段解析 |
 | **替代 Wireshark / PRONETA 等协议分析器** | 库不含数据格式，无法解析协议字段 |
@@ -243,6 +246,14 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 > **部署要求（写进文档）**：v1 只应部署在**受控工业局域网**内；跨不可信网段时必须在外部加隧道（VPN / wireguard / 交换机 ACL）。
 > **API 预留**：`iocomm_runtime_config` 已保留 `features` 能力位，v2 的 TLS 会以 `ICOMM_FEAT_TLS` 发布，**不破坏 ABI**。
 
+> **域隔离边界（2026-11-05，N-44）**：**域 ≠ 安全边界**。v1 是**单发现域**——同一网段内所有启用发现的 Runtime
+> 互相可见（见 §4 非目标表）。库提供的名字锁是**机器级**（Linux 抽象 `AF_UNIX` socket / Windows `Global\iocomm_*`，
+> 后者在无 `SeCreateGlobalPrivilege` 时回退 `Local\`，见 [平台支持 §2.1](platform-support.md)），
+> **不构成网络边界**。需要两个互不可见的通信域时，请在部署层使用 **VLAN / 交换机 ACL / 独立网卡 / 网络命名空间**；
+> 不要依赖「不同组播组」——v1 的组播组地址与端口均不可配置。
+> **推论**：本库的「隔离」语义只有三条——进程边界（不能直接访问他进程句柄）、`state_dir` 属主标记（同一目录不能有两个自动 `node_id` 的 Runtime）、
+> 端点名跨进程唯一性。**没有任何一条是安全意义上的隔离**。
+
 ---
 
 ## 5. 验收标准
@@ -255,8 +266,8 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | AC-2 | 两机（跨网）互发消息，字节完全一致 | 通过 | FR-4.1 |
 | AC-3 | 对端被 `kill -9` 后，N 秒内检测到并触发事件 | 通过（检测时间可调） | FR-3.3 / FR-5.3 |
 | AC-4 | 句柄失效后再使用返回 `STALE_HANDLE` | 通过 | FR-1.6 |
-| AC-5 | **回调内销毁端点/订阅** 返回 `WOULD_DEADLOCK`，进程不崩溃。**唯一例外**：在**本订阅自己的回调内**用 `unsubscribe` 取消本订阅 → `ICOMM_OK`（见 C ABI §6.4 @special） | 通过 | FR-6.7 |
-| AC-6 | 回调中调用同步 API 返回 `WOULD_DEADLOCK` | 通过 | FR-6.7 |
+| AC-5 | **回调内销毁端点/订阅** 返回 `WOULD_DEADLOCK`，进程不崩溃。**例外清单**（见 C ABI §6.4 `@special`）：① 在**本订阅自己的回调内**用 `unsubscribe` 取消本订阅 → `ICOMM_OK`；② `conn_destroy(本回调交付的 conn)` → `ICOMM_OK`。**非阻塞的所有权/注册类调用不受本条约束**（`conn_retain` / `conn_subscribe` / `endpoint_accept` / 两个 `*_condition_subscribe`，见 FR-6.7） | 通过 | FR-6.7 |
+| AC-6 | 回调中调用**阻塞型**同步 API（`conn_send` / `endpoint_send` / `*_recv` / `connect` / `conn_close_graceful` 等）返回 `WOULD_DEADLOCK`；`conn_retain` 等非阻塞所有权调用**不返回**该码（FR-6.7 / C ABI §3.2.1） | 通过 | FR-6.7 |
 | AC-7 | 组播被禁时，靠单播 seed 仍能发现 | 通过 | FR-2.4 |
 | AC-8 | 慢消费者**不阻塞**发布者（丢弃 + 计数）。**不要求**「不影响同端点的其他连接」——共享队列的代价见 [C ABI §6.1](api/c-abi.md) | 通过 | FR-4.5 / FR-4.6 |
 | AC-9 | 进程重启后重新注册，`node_id` 不变、被识别为同一逻辑节点（用 `iocomm_runtime_node_id()` 观测） | 通过 | FR-9.1 / FR-9.2 / FR-9.4 |
@@ -279,19 +290,19 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | **AC-26** | 同一端点的 4 种溢出策略分别生效（`0` = 用 runtime 默认，zero-init 不会变成 `BLOCK`）；`BLOCK` 在同步发送上阻塞至 `timeout_ms`、在异步发送与接收侧入队上退化为 `ERROR`，返回或回调 `ICOMM_ERR_WOULD_BLOCK` 并计入 `queue_dropped` | 通过 | FR-4.5 |
 | **AC-27** | 建连失败 / 超时 / 销毁 Runtime 三种情况下，`connect_async` 的 `on_done` 均恰好触发一次（销毁时为 `CANCELLED`），且失败路径无 fd/句柄残留 | 通过 | FR-8.1 |
 | **AC-28** | 同一参数在 runtime/endpoint/tune 三处设置时，按 [C ABI §5.0](api/c-abi.md#50-配置优先级唯一的权威定义) 优先级生效 | 通过 | FR-5.6 |
-| **AC-29** | 服务端在 `endpoint_accept` 回调内 `conn_retain`，另一线程用 `conn_send` 回发；客户端能收到（回调内不得用同步 `conn_send`，会返回 `WOULD_DEADLOCK`） | 通过 | FR-8.5 / FR-8.7 / FR-8.8 |
+| **AC-29** | 服务端在 `endpoint_accept` 回调内 `conn_retain`（**端点级收消息未启用**的情形），另一线程用 `conn_send` 回发；客户端能收到（回调内不得用同步 `conn_send`，会返回 `WOULD_DEADLOCK`） | 通过 | FR-8.5 / FR-8.7 / FR-8.8 |
 | **AC-30** | `endpoint_send` 扇出到 **N = 该端点的全部成员连接**（入站成员 + `ep_owner == ep` 的出站连接），`out_delivered == N`；无成员连接时返回 `NO_RECEIVER` | 通过 | FR-8.6 |
 | **AC-31** | 出站连接上 `conn_subscribe` 能收到对端数据（双向） | 通过 | FR-8.3 |
 | **AC-32** | 同一接收对象上 `subscribe` 与 `recv` 同时使用，第二个调用返回 `INVALID_STATE` | 通过 | FR-6.8（实现依据 [C ABI §6.4](api/c-abi.md#64-拉取与推送的互斥规则)） |
-| **AC-33** | `accept` 回调返回时既未 `conn_retain` 也未 `conn_subscribe`、**且该端点未启用端点级订阅/拉取**的连接被自动收回（连接数回到 0，对端观测到优雅 FIN 而非 RST） | 通过 | FR-8.5 / FR-8.8 |
-| **AC-33b** | 回调内显式 `conn_destroy` 拒绝同样以 FIN 关闭；`conn_abort` 才产生 RST | 通过 | FR-8.8 / FR-8.9 |
+| **AC-33** | `accept` 回调返回时既未 `conn_retain` 也未 `conn_subscribe`、**且该端点未启用端点级订阅/拉取**的连接被自动收回（连接数回到 0，对端观测到优雅 FIN 而非 RST）。**多次注册的边界（N-37）**：同一端点上注册了**两个** `endpoint_accept` 回调时，**只要其中任一回调返回时完成了持有**（`conn_retain` / `conn_subscribe` / 端点级持有），连接即被保留；两个都不持有时才回收。**未在任一回调内被 `conn_destroy` 时**，全部回调**按注册顺序**各触发一次，生命周期判定在所有回调跑完后进行；**若某个回调销毁了该连接，其后尚未执行的 accept 回调不再触发**（见 AC-33b 与 C ABI §6.4 `@special`） | 通过 | FR-8.5 / FR-8.8 |
+| **AC-33b** | 回调内显式 `conn_destroy` 拒绝同样以 FIN 关闭；`conn_abort` 才产生 RST。**多次注册时（N-37）**：第一个 accept 回调内 `conn_destroy` 后，**其后尚未执行的 accept 回调不再触发** | 通过 | FR-8.8 / FR-8.9 |
 | **AC-34** | `endpoint_create` 返回非 0 句柄，且 `endpoint_name_state` 为 `HELD_BY_SELF`；按名字查询 / 枚举端点返回正确结果；不存在时返回 `NOT_FOUND` | 通过 | FR-1.1 / FR-1.3 |
 | **AC-35** | 三项静态检查全过：① 所有句柄最终 typedef 为 `uint64_t`（经 `iocomm_handle_t` 间接亦算），声明中无 `void*` 句柄；② **声明部分**（结构体字段 + 函数参数 + 返回值，排除注释）无 `long` / `size_t` / `bool`；③ **cdylib** 的公开 API 符号均为 `iocomm_*`（Linux `nm -D`，Windows `dumpbin /exports`；M0 先取实际清单，必要时给白名单）；staticlib 不做此检查 | 通过 | FR-7.1 / FR-7.4 / FR-7.6 |
 | **AC-36** | 把 `conn` 句柄传给 `endpoint_*` 函数返回 `STALE_HANDLE`（不误用） | 通过 | FR-1.6 |
 | **AC-37** | `log_fn != NULL` 时，`runtime_start` 后环境指纹**恰好输出一次**（P1） | 通过 | FR-5.7 |
 | **AC-38** | `publish_local=1` 的端点出现在 discovery 快照（本机注册表条目并入同一节点表）中，并产生 `JOINED/LEFT` 事件。**含四条边界**：① 端点**先于** `discovery_start` 创建时，启动后仍可见（扫描补齐）；② **同一用户、不同 `state_dir`** 的两个 Runtime（其中一个 `state_dir == NULL`、显式配 `node_id`）**互相可见**，且并入的 `node_info.name` **等于**对端 `runtime_config.node_name`；③ **不同用户**的 Runtime 互相看不见；④ 进程被 `kill -9` 后，对端在 **`lease_ms + discovery_heartbeat_ms` 内**（最坏一个扫描周期 + 租约）产生 `LEFT`（P1） | 通过 | FR-2.6 |
 | **AC-39** | `connect_async(ep_owner=ep)` 建立的出站连接计入 `endpoint_send` 扇出与 `conn_count(ep)`；`ep_owner=0` 时两者均不计入。**入站成员连接同样计入两者**（N-01 修正） | 通过 | FR-8.6 |
-| **AC-40** | 在 accept 回调内 `conn_retain` 后，另一线程可对该入站连接 `conn_recv` 收到数据 | 通过 | FR-8.5 / FR-6.2 / FR-6.3 |
+| **AC-40** | 在 accept 回调内 `conn_retain`（**端点级收消息未启用**）后，另一线程可对该入站连接 `conn_recv` 收到数据；**对照组**：端点已启用 `iocomm_subscribe(ep)` 时同一流程下 `conn_recv` 返回 `INVALID_STATE`（N-38 / AC-118） | 通过 | FR-8.5 / FR-6.2 / FR-6.3 |
 | **AC-41** | 环**有空位**时分别诱发：**接收**队列满（`QUEUE_FULL`）、扇出无连接（`NO_SUBSCRIBER`）、异步发送超时（`TIMEOUT`）、对端已断开时发送（`PEER_GONE`）、**发送**队列满且策略 `ERROR`（`BACKPRESSURE`，同步与异步各一次）；各产生一条 `DROPPED` 且 `drop_reason` 正确 | 通过 | FR-10.3 |
 | **AC-42** | 同一构建、同一发送脚本（≥1e6 条、固定 256 B），monitor **关闭** vs **开启但不 poll** 各 5 轮，msgs/s 中位数差值 &lt; 1% | 通过 | FR-10.5 |
 | **AC-43** | 环满时新记录**写入失败**（不覆盖），`monitor_stats.lost` 递增；每满 1024 次丢失更新预留 LOST 槽位，`degraded=1` | 通过 | FR-10.4 / FR-10.8 |
@@ -346,7 +357,7 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | **AC-91** | 一个**未产生 `SENT`** 的报错路径（`TOO_LARGE`、句柄无效）留有环空位：`poll` **取不到任何记录**，`monitor_stats.emitted` 不变；对照组（同样的消息在队列未满时正常发送）产生 `SENT` | 通过 | FR-10.15 / 线格式 §3 |
 | **AC-92** | `HELLO` 握手：① 双方互发后连接可用；② 未发 `HELLO` 直接发 `DATA` → 关闭且不投递；③ `min_version` 不满足 → `ERROR(VERSION_UNSUPPORTED)` 后关闭；④ `HELLO` 带 TLV → `ERROR(MALFORMED)`；⑤ **接收尺寸协商**：A 配 1 MiB、B 配 64 KiB，A 发 100 KiB → A 侧**同步返回** `TOO_LARGE`（不是 `on_done(OK)`，也**不触发** `on_done`）；⑥ 握手超时 → `ERROR(HANDSHAKE_TIMEOUT)` 后关闭；⑦ **交付时点**：`accept` 回调只在双向 HELLO 完成后触发——延迟对端发 `HELLO`（或故意只发 TCP 不握手）期间 `conn_count(ep)` 为 0、`accept` 未被调用；对端补发 `HELLO` 后 `accept` 触发一次且 `peer->peer_node_id == 对端 node_id`；握手超时/版本不兼容路径 `accept` **一次都不触发**（对照正常路径） | 通过 | [线格式 §2.1 / §5](api/wire-format.md) / FR-8.5 |
 | **AC-93** | 发现报文编解码：对端以组播信标上报的节点表，`discovery_snapshot` 里的 `node_id` / `name` / 端点列表与发送端一致；单播 seed 路径与组播路径得到相同结果；未知字段（TLV）被跳过 | 通过 | FR-2.1 / FR-2.4 / FR-2.9 / [线格式 §8](api/wire-format.md) |
-| **AC-94** | `iocomm_diagnostic_dump` 返回的 JSON：顶层含 `"version"` 与 `"connections"` 数组；每条连接至少含 `conn` / `peer_node_id` / `connected` / `send_queue_depth` / `recv_queue_depth`；`version` 与实际实现一致 | 通过 | FR-5.5 |
+| **AC-94** | `iocomm_diagnostic_dump` 返回的 JSON：顶层含 `"version"` 与 `"connections"` 数组；每条连接至少含 `conn` / `peer_node_id` / `connected` / `recv_queue_depth`；**`send_queue_depth` 为端点级字段**（成员连接共用端点发送队列，逐连接无定义，见 C ABI §6.1「队列归属规则」；2026-11-05，N-40）；`version` 与实际实现一致 | 通过 | FR-5.5 |
 | **AC-95** | 头文件静态检查：导出的**每个** `iocomm_*` 函数都能在 [C ABI §3.2.1 矩阵](api/c-abi.md) 中找到对应行（无遗漏），且表中列出的码都在 `iocomm_error_code` 内定义。**排除 9 个无错误通道的函数**（签名无 `iocomm_error*`）：`runtime_destroy` / `message_release` / `free_text` / `strerror` / `version_string` / `abi_version` / `runtime_wakeup` / `endpoint_count` / `discovery_snapshot_release`。其余**任何带 `err` 的**函数都必须走 `err` 报告失败，不得发明第二套渠道 | 通过 | [C ABI §3.2](api/c-abi.md) |
 | **AC-96** | UDP 传输：两个 Runtime 经 UDP 互发有界消息，字节一致；**超过 MTU 的消息返回 `TOO_LARGE`**（不静默分片）；无连接时 `endpoint_send` 返回 `NO_RECEIVER`（v1.1） | 通过 | FR-4.2 | 〔v1.1〕 |
 | **AC-97** | `iocomm_diagnostic_dump` 含 `"errors"` 数组（最近 **64** 条，v1.1 固定容量），每条含 `code` / `ts_ns` / `context`；满 64 条后环形覆盖（v1.1） | 通过 | FR-5.5b | 〔v1.1〕 |
@@ -356,12 +367,12 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | **AC-101** | `monitor_ttl_ms > 24h` → `monitor_open` 返回 `INVALID_ARGUMENT`；`monitor_ttl_ms = 0` 不自动关闭；到期后 `poll` 返回 `CLOSED`（**v1 行为**，不含载荷捕获） | 通过 | FR-10.4 / C8 / C11 |
 | **AC-99** | 协议级错误帧：对端收到超限帧 / 畸形帧时回 `ERROR(reason, detail)` 再关闭。**接收方的观测面**：① 该连接在途 `on_done` 为 `DISCONNECTED`；② `log_fn` 的 ERROR 级别输出含 `reason` 与 `detail`；③ `iocomm_stats.protocol_errors` 递增 | 通过 | FR-5.4 / [线格式 §2.1](api/wire-format.md) / NFR-3 |
 | **AC-103** | **服务端扇出（N-01）**：纯服务端（不调 `connect*`）注册端点 A，3 个客户端分别连入并在 accept 回调内 `conn_subscribe`；随后 `endpoint_send(A, …)` 返回 `ICOMM_OK` 且 `out_delivered == 3`，3 个客户端均收到字节一致的消息；`conn_count(A) == 3`。对照组：3 条连接全部 `ep_owner == 0` 的出站连接时，对 A 扇出返回 `NO_RECEIVER` | 通过 | FR-8.6 / FR-8.11 |
-| **AC-104** | **端点级订阅（N-02）**：`endpoint_create` 后**不注册** `endpoint_accept`，只调 `iocomm_subscribe(ep, on_msg)`；客户端 `connect` 并发送 3 条消息 → `on_msg` 收到 3 条、`conn_count(ep) == 1`（入站连接被端点隐式持有，未被 FIN）。对照组改用 `endpoint_recv(ep)`（prompt 拉取）得到同样结果；再对照：同一 `ep` 上先 `endpoint_recv` 再 `endpoint_accept` → 后者返回 `INVALID_STATE`（§6.4 互斥） | 通过 | FR-8.11 / FR-6.8 |
+| **AC-104** | **端点级订阅（N-02）**：`endpoint_create` 后**不注册** `endpoint_accept`，只调 `iocomm_subscribe(ep, on_msg)`；客户端 `connect` 并发送 3 条消息 → `on_msg` 收到 3 条、`conn_count(ep) == 1`（入站连接被端点隐式持有，未被 FIN）。对照组改用 `endpoint_recv(ep)`（prompt 拉取）得到同样结果 | 通过 | FR-8.11 / FR-6.8 |
 | **AC-105** | **重连语义（N-06）**：客户端 `connect` 后对端 `kill -9`，再用**同一** endpoint/地址重启。① **句柄复用**：断开前后及重连成功后 `iocomm_conn_t` 不变（`conn_status` 在重连窗口内仍可调用）；重连窗口内 `connected = FALSE`（不是 `UNKNOWN`——句柄已存在且确知未连通），`lively` / `healthy` 在心跳窗口未满前为 `UNKNOWN`，重连成功且窗口满后均为 `TRUE`；② **在途不重放**：断开前入队的 3 条未发消息在断开时各产生 `DROPPED(PEER_GONE)`、异步 `on_done(DISCONNECTED)` 各一次，重连成功后对端**一条也收不到**；③ **序号重置**：重连后首条消息的 `sequence` 从 1 重新开始（不接续断开前的值）；④ **订阅保持**：断开前已 `conn_subscribe` 的回调在重连后**无需重新订阅**即继续收到消息，`conn_status.peer_node_id` 更新为新对端的 `node_id`、`reconnect_count` 递增。**`connected` 在重连窗口内为 `FALSE`（不是 `UNKNOWN`）**——句柄尚在且确知未连通，与 AC-86「`connected = UNKNOWN` 只出现在建连前」的口径一致 | 通过 | FR-4.4 / FR-5.1 |
 | **AC-106** | **端点级套接字参数（N-12）**：① `endpoint_config.tcp_nodelay = 0`（默认）与 `= 1` 时，`getsockopt(TCP_NODELAY)` 为 1、`= 2` 时为 0；非 0/1/2 → `endpoint_create` 返回 `INVALID_ARGUMENT`。② 同一参数在 `endpoint_config` 显式设 `2`、`tune_config.tcp_nodelay = 1` 时，按 §5.0「端点级 > tune」生效为端点值；`tune_config.tcp_nodelay` 只改**未被端点显式设置**的端点。③ `listen_backlog = 0` 时监听 socket 的 backlog 为 128（Linux `ss -lnt` 的 Send-Q 列），显式设 1 时同一时刻只允许 1 个已建立未 accept 的连接（第 2 个在 backlog 满后被拒/排队超时）；`tune_config.listen_backlog` 只对**新建**监听 socket 生效，已监听端点不变。④ 非 tcp / unix 传输（pipe / inproc）上设置这两个字段不报错（被忽略）；unix 上 `listen_backlog` 生效、`tcp_nodelay` 忽略 | 通过 | FR-4.8 |
 | **AC-107** | **`connect_node` 地址解析（N-05）**：服务端以 `listen_addr = "0.0.0.0:0"` 监听（系统分配端口），客户端从发现快照取 `node_info.endpoints` 的 `addr` → **不是** `0.0.0.0:0`，而是实际 IP:实际端口；`connect_node(node_id, 端点名)` 成功往返。失败路径：端点名不存在 → `NOT_FOUND`；`node_id` 不在发现表 → `NOT_FOUND`；端点条目的 `transport` 为未实现值 → `NOT_SUPPORTED` | 通过 | FR-8.2 / FR-8.12 |
 | **AC-108** | **端点名格式校验（N-17）**：`endpoint_create` 对以下名字各返回 `INVALID_ARGUMENT` 且**不注册**——① 空名（`name_len = 0`）；② `name_len = 256`（超 255 B）；③ 含 NUL 字节（如 `"a\0b"`，`name_len = 3`）；④ 空段：`"/a"`、`"a/"`、`"a//b"`；⑤ 非法 UTF-8（如孤立续字节 `"\x80"`、过长编码）。成功路径：`name_len = 255` 的 UTF-8 名、含 `/` 的合法层级名（`"plant3/line2/temp"`）均返回 `OK`。**区分度**：255 B 成功 vs 256 B 拒绝，边界两侧各一例 | 通过 | FR-1.8 |
-| **AC-109** | **手动驱动语义（N-08）**：manual 模式空闲 Runtime 上 ① `run_once(50)` 连续 5 次均返回 `TIMEOUT` 且 `err.code == ICOMM_ERR_TIMEOUT`（**不是** `OK`）；② 有事件待处理时 `run_once(50)` 返回 `OK`；③ `run_once(0)` 在有事件时返回 `OK`、无事件时立即返回 `TIMEOUT`（不等待）；④ `run_for(200)` 在空闲 Runtime 上返回 `ICOMM_OK` 且**从不返回 `TIMEOUT`**，实测耗时 ≥ 200 ms；⑤ `run_for(0)` 立即返回 `ICOMM_OK` 且不驱动任何事件（其后事件仍待处理）；⑥ owned 模式下两者均返回 `INVALID_STATE` | 通过 | FR-6.4 |
+| **AC-109** | **手动驱动语义（N-08）**：manual 模式空闲 Runtime 上 ① `run_once(50)` 连续 5 次均返回 `TIMEOUT` 且 `err.code == ICOMM_ERR_TIMEOUT`（**不是** `OK`；此处的「空闲」= **无就绪 IO、无到期定时器、无内部任务、且无 `runtime_wakeup` 待处理**，见 N-50）；② 有事件待处理时 `run_once(50)` 返回 `OK`；③ `run_once(0)` 在有事件时返回 `OK`、无事件时立即返回 `TIMEOUT`（不等待）；④ `run_for(200)` 在空闲 Runtime 上返回 `ICOMM_OK` 且**从不返回 `TIMEOUT`**，实测耗时 ≥ 200 ms；⑤ `run_for(0)` 立即返回 `ICOMM_OK` 且不驱动任何事件（其后事件仍待处理）；⑥ owned 模式下两者均返回 `INVALID_STATE` | 通过 | FR-6.4 |
 | **AC-110** | **监听配置组合（N-14）**：① `listen_transport` 与 `listen_addr` 均空 → `endpoint_create` 返回 `OK`，`endpoint_local_addr()` 返回 `INVALID_STATE`，该端点可作 `ep_owner` 扇出；② 只填 `listen_addr`（transport 空）→ `INVALID_ARGUMENT`；③ 只填 `listen_transport`（addr 空）→ `INVALID_ARGUMENT`；④ 未知传输名 `"quic"` + 非法地址 → `NOT_SUPPORTED`（传输名优先于地址格式）；⑤ 执行 ②③④ 之后，**同名端点仍可成功创建**（失败未占用名字）。**区分度**：三种**不同**的结果各自被断言——`OK`（①）、`INVALID_ARGUMENT`（②③）、`NOT_SUPPORTED`（④）；②③ 同码但走的是不同分支（缺少 transport vs 缺少 addr），各自单独断言 | 通过 | FR-8.13 |
 | **AC-111** | **`op_id` 唯一性与取消（N-10）**：① 同一 Runtime 上并发发起 10 路 `conn_send_async` / `endpoint_send_async`，得到的 10 个 `op_id` **两两不同**；② 对已完成的 op 调 `send_cancel` → `NOT_FOUND`，且该 op 的 `on_done` **不再**触发（回调计数不变）；③ 对从未分配的 `op_id`（如 `UINT64_MAX`）→ `NOT_FOUND`；④ 对**已取消过**的同一 `op_id` 再次 `send_cancel` → `NOT_FOUND`（幂等失败，不重复 `on_done`）；⑤ 对未完成 op 取消 → `OK` 且 `on_done(CANCELLED)` 恰好一次。**不测跨 Runtime**：判据只是目标 Runtime 自己的操作表，数值碰巧相同就会误取消对方同号操作——这是 `op_id` 不可跨 Runtime 使用的原因，不是需要验收的行为 | 通过 | FR-8.14 |
 | **AC-112** | **`clock_synced` 恒 0（N-11）**：tcp 上收到任意 `DATA` 帧时 `iocomm_message.clock_synced == 0`；抓包可见发送方携带 `CLOCK_SYNCED = 0`（线格式 §3 规则 6）；**删除**该 tag 后接收方仍按 0 处理且不判损坏；inproc 上同样为 0。**不应有**任何配置项或状态能把该值变为 1 | 通过 | 线格式 §3 / 架构 §6.5 |
@@ -369,6 +380,18 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | **AC-114** | **无消费者端点的入站连接（N-24）**：端点 A 只 `create`，**不注册** `endpoint_accept`、也不启用 `iocomm_subscribe(ep)` / `endpoint_recv(ep)`。对端 `connect` 成功后：① 对端观测到优雅 FIN（`recv` 返回 0）而非 RST；② `conn_count(A) == 0`；③ `log_fn` 出现一条含端点名的 WARN；④ `stats.protocol_errors` 与 `queue_dropped` 均不递增。对照组：同一端点在 `connect` 前调 `iocomm_subscribe(ep)` → 连接存活、消息正常投递、`conn_count(A) == 1` | 通过 | FR-8.8 |
 | **AC-115** | **共用 `state_dir`（N-25）**：进程 P1 以 `node_id = 0` + 可写 `state_dir = D` 创建 Runtime → `OK`；同机进程 P2 用**同一** `D`、`node_id = 0` 创建 → **`CONFLICT`**，`message` 含 `D`；P2 改用显式 `node_id` 或另一个 `state_dir` → `OK`。对照组：P1 退出（`destroy`）后 P2 用同一 `D` 重新创建 → `OK`（存活探测随进程结束而失效） | 通过 | FR-9.2 |
 | **AC-116** | **Stopped 后不可重启（N-22）+ 写操作返回码（N-21）**：`stop` 后：① 对同一 Runtime 调 `runtime_start` → `ICOMM_ERR_CLOSED`；② `endpoint_create` / `iocomm_subscribe` / `conn_send` 各返回 `ICOMM_ERR_CLOSED`（**不是** `INVALID_STATE`）；③ `stop` 重复调用返回 `ICOMM_OK`（幂等）、`drain` 合法；④ `run_once` / `run_for` 仍可调用（**用于排空在途**——`stop` 不取消在途操作，只停止接受新写）；⑤ `destroy` 后重建 Runtime 一切正常 | 通过 | FR-6.5 / FR-8.1 |
+| **AC-117** | **`endpoint_accept` 与端点级收消息正交（N-37 / N-51）**：同一 `ep` 上**先** `endpoint_recv(ep)` 再 `endpoint_accept(ep, fn)` → 后者返回 `ICOMM_OK`（**不是** `INVALID_STATE`）；随后客户端 `connect` → `fn` **仍被触发一次**、同时 `endpoint_recv(ep)` 能拉到该连接的消息。反向顺序（先 accept 后 recv）结果相同；同一端点注册**两个** accept 回调 → 两个都按注册顺序各触发一次。**注册与连接并发**：在 `connect` 进行中的同时注册第二个 accept 回调，**不要求**该在途连接被补发交付（§6.4 未规定补发），但要求**不得崩溃、不得重复交付** | 通过 | FR-6.8 / FR-8.11 |
+| **AC-118** | **端点级持有后 `conn_retain` 不改路由（N-38）**：端点已启用 `iocomm_subscribe(ep)` 时，在 accept 回调内对 inbound 调 `conn_retain` → 返回 `ICOMM_OK`；此后对同一 `conn_recv(conn)` → 返回 `ICOMM_ERR_INVALID_STATE`，而对端发来的消息仍由 `on_msg` 收到（**不双投**）。对照组：端点**未**启用端点级收消息时，同一流程下 `conn_recv` 能正常收到 | 通过 | FR-8.11 |
+| **AC-119** | **`conn_retain` 的线程与订阅顺序（N-36 / N-41）**：① 在 `endpoint_accept` 回调内调 `conn_retain` → 返回 `ICOMM_OK`（**不是** `WOULD_DEADLOCK`）；② 该连接在回调外（另一线程）调 `conn_retain` → 同样 `ICOMM_OK`；**两个线程并发**对同一连接各调一次 `conn_retain` → 均返回 `ICOMM_OK`、连接仍存活（`conn_status` 可调）；③ `conn_retain` 之后在回调外调 `conn_subscribe` → `ICOMM_OK`，此后消息走订阅回调；④ 该连接上再调 `conn_recv` → `INVALID_STATE`（订阅与 recv 二选一照常适用） | 通过 | FR-6.7 / FR-8.5 / FR-8.7 / FR-8.8 |
+| **AC-120** | **`runtime_wakeup` 使 `run_once` 返回 `OK`（N-50）**：manual 模式空闲 Runtime 上，主线程阻塞在 `run_once(rt, 5000)`，另一线程 100 ms 后调 `iocomm_runtime_wakeup(rt)` → `run_once` 在 **1 s 内**返回且返回码为 `ICOMM_OK`（**不是** `TIMEOUT`）；无唤醒时同样调用 `run_once(50)` 仍返回 `TIMEOUT` | 通过 | FR-6.4 / FR-6.5 |
+| **AC-121** | **端点级条件订阅（N-45）**：端点 `ep` 上先 `iocomm_subscribe(ep, on_msg)`（**必要前置**——只注册条件订阅不构成持有，按 FR-8.8 连接会在交付时点即 FIN，见 AC-114）再 `iocomm_endpoint_condition_subscribe(ep, fn)`；接入 2 条入站连接 → 对第 1 条注入一次 `ERROR` 帧 → `fn` **至少收到一次**且 `conn` **等于该连接句柄**、`ep == ep`（两者均非 0）；对第 2 条调 `conn_destroy` → `fn` **在该连接关闭后不再投递**；`unsubscribe(该订阅)` 一次即覆盖全部成员连接。**变体**：订阅建立时**已存在**的 `ep_owner == ep` 出站连接**同样**进入订阅范围（成员定义与 FR-8.6 扇出集合一致）。**不断言**「订阅建立瞬间是否先推一次当前值」——该口径与**连接级** `iocomm_conn_condition_subscribe` **共用同一条规则**（见 C ABI §8 注释），AC 只断言**变化**被推送 | 通过 | FR-5.2 |
+
+> **新增验收项的里程碑归属（2026-11-05）**：**AC-117 / AC-118 / AC-119** 归 **M2**（需要真实的入站连接与 accept 交付）；
+> **AC-120** 归 **M1**（manual 驱动在 M1 已可用）；**AC-121** 归 **M3**（条件集与心跳判定属 M3）。
+>
+> **既有 AC 的同步改动（2026-11-05，共 9 条）**：AC-5 / AC-6（补 `conn_retain` 等非阻塞调用的例外）、
+> **AC-29 / AC-40**（补「端点级收消息未启用」限定；AC-40 另加对照组）、**AC-33 / AC-33b**（补多次注册的持有与销毁边界）、
+> AC-94（`send_queue_depth` 改端点级）、AC-104（删 accept/recv 互斥的末位断言）、AC-109（「空闲」排除有 `wakeup` 待处理）。
 
 ### 5.2 平台验收
 
@@ -417,3 +440,4 @@ v1 **不提供**传输加密与认证。这不是「漏了」，而是**首版�
 | 2026-11-04 | **N-18 / N-19 处置（复审新发现，随 N-08–N-14 同批落文档）**：① **N-18**：握手期内部会话「每端点 ≤ `max_handles`」保留为**局部**保护——删去「防止 fd 耗尽」的错标，明写聚合上界 = `端点数 × max_handles` 是**软上界**，全局 fd 由部署侧 `ulimit -n` 兜底；被拒 socket 只写 `log_fn` WARN，不新增计数。② **N-19**：交付时句柄表已满 → **不交付、不触发 `accept`、立即 FIN**、写 `log_fn` ERROR，不计 `protocol_errors` / `queue_dropped`；FR-8.5 补一句；新增 **AC-113**（归 M2）。两项均不占用 §8 原 15 条的计数 |
 | 2026-11-04 | **N-17 处置（端点名格式与长度上限）**：新增 **FR-1.8** + **AC-108**（归 M1）——端点名 UTF-8 编码后 **1–255 B**、不得含 NUL、合法 UTF-8、`/` 层级无空段，违反 → `INVALID_ARGUMENT`。补 [C ABI §5.1a](api/c-abi.md)（含与 `iocomm_endpoint_info.name_len`（`u16`）及 1400 B 发现分页的关系）。 |
 | 2026-11-05 | **N-20 ～ N-35 收口**（M0 冻结前残留核对，详见 [open-questions §8.8](open-questions.md)）：句柄口径统一为「五类对象句柄，Runtime 不占」；Stopped 为终态、写操作统一返回 `CLOSED`，`runtime_stop` **不取消在途操作**（N-29，与 §5.2 取消表一致）；`TOO_LARGE` 一律同步返回（修正 AC-73/AC-82/AC-92⑤）；`too_large` 丢弃原因仅限接收侧；无消费者端点的入站连接交付即关闭；共用 `state_dir` 检出即 `CONFLICT`；`max_message_size` 下限改为 56 B；AC-86 的「注入 `ERROR` 后 `healthy = FALSE`」改测 `iocomm_condition_fn` 推送（N-34）；Windows 名字锁 `Global\` 失败回退 `Local\` 并写 WARN（N-30，落架构 §6.4 与 `platform-support.md`）。新增 **AC-114 / AC-115 / AC-116**；补 FR-8.8 / FR-9.2 / FR-6.5 口径。N-35（许可证）仅登记、待负责人决策，未改文档 |
+| 2026-11-05 | **N-36 ～ N-52 用户清单核实与收口**（详见 [open-questions §9](open-questions.md)）：① `conn_retain` 去掉 `WOULD_DEADLOCK`/`TIMEOUT`（N-36）、`endpoint_accept` 与端点级收消息定为正交两轴（N-37）、端点级持有后 `conn_retain` 不改路由且 `conn_recv` 返回 `INVALID_STATE`（N-38）、线程表补注册类入口（N-39）、AC-94 队列深度改端点级（N-40）、`conn_retain` 后订阅合法（N-41）、destroy 矩阵补 `WOULD_DEADLOCK`（N-49）、`run_once` 唤醒返回 `OK`（N-50）、AC-104 删互斥断言（N-51）、`monitor_poll` 去 `TIMEOUT`（N-52）；② 新增非目标三条——跨进程集中监控（N-42）、post 类投递（N-43）、多通信域（N-44）；③ 端点级条件订阅补完整语义（N-45）；④ **新增 AC-117 ～ AC-121**，改动 AC-5/6/29/33/33b/40/94/104/109 |
