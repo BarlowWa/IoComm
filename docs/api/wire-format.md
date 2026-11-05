@@ -26,7 +26,7 @@
 | 16 | 4 | `reserved` | 必须为 0；读方忽略 |
 
 - **整帧长 = 20 + `tlv_len` + `payload_len`**，没有冗余的长度字段（冗余 = 两处可能不一致）。
-- 读方的解码顺序：读满 20 B → 校验 `magic` / `version` / `reserved` → 按 `tlv_len` 读扩展区 → 按 `payload_len` 读载荷。
+- 读方的解码顺序：读满 20 B → 校验 `magic` / `version` → 按 `tlv_len` 读扩展区 → 按 `payload_len` 读载荷（`reserved` 读取但**不校验**，见 §6）。
 - **所有多字节整数按 `flags.bit0` 指定端序**；发送方固定写 little-endian（`bit0 = 1`），读方必须支持两种。
 - **上限**：`20 + tlv_len + payload_len ≤ max_message_size`（默认 1 MiB）。超限的处理见 C ABI §9.3「消息尺寸上限」。
 
@@ -66,7 +66,7 @@ payload 固定 6 B：`reason(u16)` + `reserved(u16)` + `detail(u32)`。
 - **各 reason 的触发点**：
   | reason | 由谁发 | 同时产生的本地结果 |
   |---|---|---|
-  | `FRAME_TOO_LARGE` | 接收方：入站整帧 > `max_frame_bytes` —— **发 ERROR**（能读到完整 20 B 头就已知道超限，且对端懂 ERROR） | `DROPPED(TOO_LARGE)` + 计数 |
+  | `FRAME_TOO_LARGE` | 接收方：入站整帧 > `max_frame_bytes` —— **发 ERROR**（能读到完整 20 B 头就已知道超限，且对端懂 ERROR） | `DROPPED(TOO_LARGE)` + `queue_dropped++`；**本端发出 `ERROR` 不计入 `protocol_errors`**（该计数只统计接收侧） |
   | `HANDSHAKE_TIMEOUT` | 双方各自计时，先到者发 | 入站：不触发 `accept`；出站：`connect` 返回 `ICOMM_ERR_TIMEOUT`，`connect_async` 的 `on_done(ICOMM_ERR_TIMEOUT)`（**建连阶段**口径见 C ABI §5.2；它与下方「接收方的观测面」中的 `on_done(DISCONNECTED)` 不冲突——后者只描述**已建立连接**被协议错误终止） |
   | `VERSION_UNSUPPORTED` | 收到不兼容 `HELLO` 的一方 | 入站：不触发 `accept`；出站：`connect` 返回 `ICOMM_ERR_DISCONNECTED`，`connect_async` 的 `on_done(ICOMM_ERR_DISCONNECTED)` |
   | `MALFORMED` | 接收方：magic / 长度 / TLV 校验失败 | 建连阶段同上（`DISCONNECTED`）；**已建立连接**上的畸形帧按下方「接收方的观测面」 |
@@ -346,6 +346,12 @@ payload 固定 6 B：`reason(u16)` + `reserved(u16)` + `detail(u32)`。
 
 > 与连接内帧的 `max_message_size` 是**两套上限**：UDP 受 MTU 约束，TCP/unix/pipe 受 `max_message_size` 约束。
 > 把 1 MiB 的端点表直接塞进一个 UDP 包在现场必然会被分片或丢弃。
+
+**Windows 上的绑定机制（与 Linux 一致，无需额外开关）**：
+
+- **组播接收**：所有 Runtime 加入同一组播组、绑同一端口（`47377`），由内核按组播语义复制——Windows 同样成立。
+- **单播接收**：完全靠 **`47378..47477` 端口区间**，每个 Runtime 绑不同端口；**不依赖 `SO_REUSEPORT`**（Windows 没有该选项）。
+- **单播 socket 不设 `SO_REUSEADDR`** 在 Windows 上**不是可选项而是必须**：Windows 的 `SO_REUSEADDR` 会抢占端口，正是 §8.1 要避免的局面（对照见 [平台支持](../platform-support.md) 的套接字差异表）。
 
 ---
 

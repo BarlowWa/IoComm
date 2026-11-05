@@ -175,7 +175,7 @@ Handle = u64
 - 创建：索引从 1 分配、代际从 1 开始。**第一个合法句柄是 `(1<<32)|1`，绝不为 0。**
 - 销毁：`generation += 1`，对象释放。
 - 查找：**先校验句柄种类**，再比对代际；任一不符 → `STALE_HANDLE`。
-  > 六类对象（Runtime / endpoint / conn / subscription / snapshot / monitor）共用同一张表，但**种类是句柄的一部分**：把 `conn` 句柄传给 `endpoint_*` 函数会被拒绝，而不是被当成同号对象误用。**审计没有句柄**（回调 sink）。
+  > 六类对象（Runtime / endpoint / conn / subscription / snapshot / monitor）共用同一张表——其中 **Runtime 是表的主人，不占 `max_handles`**；计入名额的是**五类对象句柄**（endpoint / conn / subscription / snapshot / monitor）。**种类是句柄的一部分**：把 `conn` 句柄传给 `endpoint_*` 函数会被拒绝，而不是被当成同号对象误用。**审计没有句柄**（回调 sink）。
 - **绝不传裸指针**，跨 FFI 只传 `u64`。
 
 > 槽位记录 `{kind, generation, object}`；`kind` 区分 Runtime / endpoint / conn / subscription / snapshot / **monitor**。C ABI 中**不出现 `void*` 型的不透明对象**。
@@ -195,9 +195,14 @@ NodeId = u64
   不满足（`state_dir` 为空、路径不存在、不是目录、创建/读取/写入文件失败）→
   `iocomm_runtime_create` 返回 `INVALID_ARGUMENT`，`err.message` 指明「自动 `node_id` 需要可写的 `state_dir`，
   或显式配置 `node_id`」。
-- 落盘文件：`<state_dir>/iocomm.nodeid`，内容为 16 位小写十六进制 + `\n`。首次以**原子创建**
-  （`O_CREAT | O_EXCL` / `CREATE_NEW`）写入；已存在则读取。文件内容不合法（长度/字符不符）→
-  `INVALID_ARGUMENT`（**不自动重新生成**——静默换号会破坏 FR-9.1）。
+- 落盘文件（两个，职责不同）：
+  - **`<state_dir>/iocomm.nodeid`** —— 持久化的 NodeId，内容为 16 位小写十六进制 + `\n`。首次以**原子创建**
+    （`O_CREAT | O_EXCL` / `CREATE_NEW`）写入；已存在则读取。文件内容不合法（长度/字符不符）→
+    `INVALID_ARGUMENT`（**不自动重新生成**——静默换号会破坏 FR-9.1）。**重启后 NodeId 稳定靠它**。
+  - **`<state_dir>/iocomm.owner`** —— 属主标记，内容为 `<node_id>` + `<pid>` + 进程启动时间（N-25）。
+    同样以**独占创建**占住；用于判断「同一 `state_dir` 是否已被另一存活进程使用」。
+    **与 `iocomm.nodeid` 分开是必须的**：前者要跨重启保持不变，后者每次 `runtime_create` 都要反映**当前**属主，
+    两者的生命周期相反，合并会导致「重启后仍判旧 pid 存活」或「丢 NodeId」。
 - **v1 不提供任何宿主级派生**（2026-11-04 定，N-04）：**不读** machine-id / `MachineGuid` / 主机名 / MAC。
   理由（两约束夹逼，唯一解）：
   - 主机级纯函数（machine-id / 主机名 / MAC 哈希）在**同机多进程必然同值**，直接违反本节 v1 语义；
@@ -206,12 +211,14 @@ NodeId = u64
     **只读文件系统 / 无 `state_dir` 的场景一律要求调用方显式配置 `node_id`**（库拒绝自动模式，不猜测）。
   - **Windows 与 Linux 同规则**：v1 不做 Windows 派生，不存在「Windows 派生源」的规定。
 - **v1 语义：`NodeId` 唯一标识一个 Runtime 实例**，同机多进程各自拥有独立 NodeId（不共享）。
-  **含 `state_dir` 的情况也一样**：多个进程配置**同一个** `state_dir` 时，先创建者写入 `node_id` 文件，
-  后创建者读到它会导致**共享同一 NodeId**——这是配置错误，库不检测（v1 无 `process_epoch` 可区分）。
-  文档要求：**每个 Runtime 使用独立的 `state_dir`**；共用目录属未定义行为。
+  **含 `state_dir` 的情况也一样**：多个进程配置**同一个** `state_dir` 时，先创建者以独占创建占住目录内的
+  **属主标记 `iocomm.owner`**（记 `<node_id>` + `<pid>` + 启动时间）；后创建者发现**属主进程仍存活** →
+  `runtime_create` 返回 **`ICOMM_ERR_CONFLICT`**（`message` 指明目录），因此**不会**共享同一 NodeId。
+  属主进程已退出（`destroy` 或崩溃）时目录可复用，残留标记按「进程不存在」判失效。
+  **每个 Runtime 仍应使用独立的 `state_dir`**（这是推荐部署，不是唯一正确方式）。
   「同机多进程共享主机身份、用 `(NodeId, process_epoch)` 区分」是 **v1.1** 的扩展（FR-9.3），v1 不实现 `process_epoch`，任何 C 结构体里也没有这个字段。
 
-> **N-04 的取舍（本项为实施方推荐，待确认）**：把「只读 / 无 `state_dir`」从「库自动派生」改为
+> **N-04 的取舍（2026-11-05 已闭环，保留作决策记录）**：把「只读 / 无 `state_dir`」从「库自动派生」改为
 > 「要求显式 `node_id`」是**产品取舍**——它把部署负担推给调用方，换取 v1 语义自洽。若产品要求
 > 「无 `state_dir` 也能自动建号」，唯一自洽的替代是**放宽 v1「每 Runtime 独立」语义**（提前采用
 > v1.1 的 `process_epoch` 方案），那属需求变更，不在本项处置范围内。
@@ -283,9 +290,9 @@ NodeId = u64
 >                                          └──失败 / 超时 / 版本不兼容──► Disconnected（不产生 accept 回调）
 > ```
 >
-> `Handshaking` 是**内部会话**：还没有 `iocomm_conn_t` 句柄、不占 `max_handles`、对应用不可见（§5.2、[线格式 §5](../api/wire-format.md)）。
+> `Handshaking` 是**内部会话**：还没有 `iocomm_conn_t` 句柄、不占 `max_handles`、对应用不可见（§5.2、[线格式 §5](api/wire-format.md)）。
 > 它只在**交付时**（双向 HELLO 完成后）进入 `Connected` 并触发 `accept` 回调——「`Connected` = 应用可见」对入站同样成立。
-> **握手失败 / 超时路径不触发 `accept`**（只产生日志/计数）。重建由对端发起；inproc 没有握手，接受后直接 `Connected` 并交付（[线格式 §7](../api/wire-format.md)）。
+> **握手失败 / 超时路径不触发 `accept`**（只产生日志/计数）。重建由对端发起；inproc 没有握手，接受后直接 `Connected` 并交付（[线格式 §7](api/wire-format.md)）。
 
 **状态是条件集，不是单一枚举**（见 [需求 FR-5.1](requirements.md)）：
 
@@ -410,7 +417,7 @@ Message {
 | 平台 | 机制 |
 |---|---|
 | **Linux** | 以端点名派生一个**抽象命名空间 socket**（`@iocomm/<hash>`）。bind 成功 = 抢到；`EADDRINUSE` = 他进程持有。本进程自持的名字先查本地表。抽象命名空间**零残留**（进程死亡自动释放） |
-| **Windows** | 命名内核对象 `Global\iocomm_<hash>`（`CreateMutexW` + `ERROR_ALREADY_EXISTS`）。进程退出时内核自动回收句柄 |
+| **Windows** | 优先 `Global\iocomm_<hash>`（`CreateMutexW` + `ERROR_ALREADY_EXISTS`，跨会话可见）；创建失败（`SeCreateGlobalPrivilege` 不足，普通用户默认没有）时回退 `Local\iocomm_<hash>`（同会话可见，**同机跨会话的端点名唯一性不保证**），并在 `log_fn` 写 WARN。进程退出时内核自动回收句柄 |
 | **本机 IPC（unix/pipe）** | 复用同一套名字锁；实际 socket 文件放 `/run/iocomm/` 或命名管道，不在 `/tmp` |
 
 **规则**：
@@ -437,7 +444,7 @@ Message {
 | 项 | 规则 |
 |---|---|
 | 目录 | **本机固定的每用户目录**（**不是** `state_dir`）：Linux `$XDG_RUNTIME_DIR/iocomm/local/`，无该变量时 `$HOME/.iocomm/local/`；Windows `%LOCALAPPDATA%\iocomm\local\`。所有 Runtime 共用这一个目录——"互相发现"与"`state_dir` 各自独立"（[§5.1b](#51b-节点身份nodeid) 要求每个 Runtime 用自己的 `state_dir`）本来就不该绑在一起 |
-| 文件名 | `<node_id>-<pid>.bin`（十六进制）。**不用 `process_epoch`**——它是 v1.1 的扩展（FR-9.3），v1 的任何 C 结构体里都没有；`pid` 在进程存活期内唯一，进程退出后的残留由租约清理。**同进程内两个 Runtime 被显式配成同一 `node_id`** 属配置错误（与「共用 `state_dir`」同类，§5.1b），文件名相同 → 后写者覆盖，库不检测 |
+| 文件名 | `<node_id>-<pid>.bin`（十六进制）。**不用 `process_epoch`**——它是 v1.1 的扩展（FR-9.3），v1 的任何 C 结构体里都没有；`pid` 在进程存活期内唯一，进程退出后的残留由租约清理。**同进程内两个 Runtime 被显式配成同一 `node_id`** 属配置错误，文件名相同 → 后写者覆盖，库不检测（与「跨进程共用 `state_dir`」不同：后者由 §5.1b 的属主标记检出并返回 `CONFLICT`） |
 | 内容 | **与 `BEACON` 的报文体同构**（[线格式 §8](api/wire-format.md)）：节点自述 TLV（`NODE_ID` / `NODE_NAME` / `WIRE_VERSION` / `LEASE_MS`）+ `ENDPOINTS` 条目（`name` + `transport` + **通告 `addr`**，取值规则与网络发现完全一致，见 [线格式 §8 规则 6](api/wire-format.md)）。**`NODE_NAME` 因此有明确来源**——就是 `runtime_config.node_name`，与组播路径的 `iocomm_node_info.name` 取值规则相同；不引入第二套格式 |
 | 写入 | **整文件重写 + rename 原子替换**（读者永远看不到半个文件）。触发点：端点创建 / 销毁 / 地址变化、以及**每个发现心跳周期**（刷新 mtime） |
 | 读取 | **每个发现心跳周期**扫描目录（不只启动时）：把每个**非本 Runtime** 的单元文件按 `BEACON` 的解析规则组装成**一条 `iocomm_node_info`**（`name` 取 `NODE_NAME` tag，`endpoints` 取 `ENDPOINTS` tag），并入同一节点表（与组播 / seed 的结果走同一条合并路径，`JOINED` / `UPDATED` / `LEFT` 语义不变）。**读取侧三道校验**：① 文件 ≤ `max_message_size`（防损坏或被恶意放大），超限视为无效并删除；② 文件内的 `NODE_ID` 必须与文件名中的 `<node_id>` 一致，不一致视为无效；③ **`NODE_ID` 相同的另一个单元文件**（同进程被配成同一 `node_id`，或显式 `node_id` 重复）→ 只保留 **mtime 较新**的那条，并在 `log_fn` 写一条 WARN（否则 `connect_node` 按 `node_id` 查找会歧义） |
@@ -564,7 +571,7 @@ enum ErrorCode {
 | # | 里程碑 | 产出 | 验收 |
 |---|---|---|---|
 | **M0** | 骨架 | C ABI 头（C99 可编译）+ crate 划分 + CI 三平台构建 | AC-P1 / AC-P5 / AC-18 / AC-24 / AC-35 / AC-95 |
-| **M1** | inproc 闭环 | 句柄表（代际）+ Runtime + 端点/连接模型 + **跨进程名字表（§6.4）** + **端点名格式/长度校验（§c-abi 5.1a）** + **手动驱动语义（`run_once` / `run_for`）** + `inproc` 传输（FR-3.5–3.10） | AC-4 / AC-11 / AC-25 / AC-32 / AC-33 / AC-36 / AC-40 / AC-80 / AC-81 / AC-82 / AC-83 / AC-84 / AC-89 / AC-100 / AC-102 / **AC-108** / **AC-109** / **AC-111** |
+| **M1** | inproc 闭环 | 句柄表（代际）+ Runtime + 端点/连接模型 + **跨进程名字表（§6.4）** + **端点名格式/长度校验（§c-abi 5.1a）** + **手动驱动语义（`run_once` / `run_for`）** + `inproc` 传输（FR-3.5–3.10） | AC-4 / AC-11 / AC-25 / AC-32 / AC-33 / AC-36 / AC-40 / AC-80 / AC-81 / AC-82 / AC-83 / AC-84 / AC-89 / AC-100 / AC-102 / **AC-108** / **AC-109** / **AC-111** / **AC-114** / **AC-115** / **AC-116** |
 | **M2** | TCP + 双向 | tcp 传输 + accept + connect + send/recv/subscribe + 异步排队超时 + **[线格式](api/wire-format.md)（HELLO 握手 · ERROR 帧 · 尺寸协商）** + **端点级套接字参数（`TCP_NODELAY` / backlog）** | AC-1 / AC-2 / AC-10 / AC-29 / AC-30 / AC-31 / AC-33b / AC-39 / AC-73 / AC-74 / AC-75 / AC-76 / AC-77 / AC-78 / AC-90 / AC-92 / AC-99 / AC-103 / AC-104 / **AC-106** / **AC-110** / **AC-112** / **AC-113** |
 | **M3** | 状态与监控 | 心跳 + 条件集 + 指标 + 诊断（JSON 结构见 AC-94）+ **消息监控（信封级）** + **自动重连语义** | AC-3 / AC-5 / AC-6 / AC-12 / AC-13 / AC-15 / AC-20 / AC-27 / AC-28 / AC-37 / AC-41 / AC-42 / AC-43 / AC-44 / AC-45 / AC-53 / AC-55 / AC-57 / AC-59 / AC-64 / AC-68 / AC-71 / AC-72 / AC-86 / AC-91 / AC-94 / AC-101 / **AC-105** |
 | **M4** | 发现 | 组播 + 单播 seed + 节点身份 + 阶段二端点能力 + **[发现线格式](api/wire-format.md#8-发现报文阶段一--阶段二)** + **`connect_node` 地址解析** | AC-7 / AC-9 / AC-14 / AC-16 / AC-21 / AC-22 / AC-23 / AC-34 / AC-38 / AC-79 / AC-85 / AC-87 / AC-93 / **AC-107** |

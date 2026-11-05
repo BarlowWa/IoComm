@@ -50,6 +50,7 @@ Server 2016 = build 14393。以下特性在它上面**不可用**：
 | `TCP_KEEPIDLE` / `TCP_KEEPINTVL` | ❌（Win10 1709+ 才有） | `SIO_KEEPALIVE_VALS` |
 | `SO_REUSEPORT` | ❌ | 单 acceptor + IOCP 分发 |
 | `SO_REUSEADDR` | ⚠️ 语义不同（会抢占端口） | 服务端用 `SO_EXCLUSIVEADDRUSE` |
+| **跨进程名字锁**（`CreateMutexW`） | ⚠️ `Global\` 命名空间需 `SeCreateGlobalPrivilege`（默认仅管理员 / 服务账户持有），普通用户进程创建失败 | **优先 `Global\iocomm_<hash>`（跨会话可见）；失败时回退 `Local\iocomm_<hash>`**（同会话可见，**同机跨会话的端点名唯一性不保证**），并写 `log_fn` WARN。见 [架构 §6.4](architecture.md#64-跨进程名表fr-15-三态查询) |
 
 **可用**：Winsock 2、IOCP、命名管道、组播、`AcceptEx`/`ConnectEx`、overlapped IO。
 
