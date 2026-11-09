@@ -170,7 +170,8 @@ const char* iocomm_strerror(int32_t code);  /* 静态存储期，不要 free */
 | 函数族 | 可能的错误码（`OK` 除外） |
 |---|---|
 | `iocomm_runtime_create` | `INVALID_ARGUMENT`（`cfg` 为 NULL / `max_message_size > 64 MiB` 或 **< 56 B**（见 §6.0）/ 枚举非法 / **`node_id == 0` 时 `state_dir` 为空或不可写**）、`CONFLICT`（`node_id == 0` 时 `state_dir` 的名字文件已被**另一存活进程**占用，见 `runtime_config.node_id` 注释）、`RESOURCE_EXHAUSTED`、`INTERNAL` |
-| `iocomm_runtime_start` / `iocomm_runtime_drain` | `STALE_HANDLE`、`WOULD_BLOCK`（manual `drain` 未排空）、`INTERNAL`（Stopped 下 `drain` 合法；`start` 的返回码见下行）。**两者都没有 `WOULD_DEADLOCK`**：`start` 不阻塞；`drain` 在 manual 模式下**本来就要求**在 loop 线程上交替 `run_once` 调用（见下方注释），在 loop 线程调用是**正常用法** |
+| `iocomm_runtime_start` | `STALE_HANDLE`、`INTERNAL`（Running 上重复调用幂等 `OK`）；**Stopped 下见下行**（`CLOSED`）。**无 `WOULD_DEADLOCK`、无 `TIMEOUT`、无 `WOULD_BLOCK`**——它不等待任何东西（manual 下只做状态迁移、不启动线程，见 §4） |
+| `iocomm_runtime_drain` | `STALE_HANDLE`、`WOULD_BLOCK`（**manual 模式**下仍有在途操作，见下方注释）、`TIMEOUT`（**owned 模式**等满 `timeout_ms` 仍未收敛；此时**不保证已排空**）、`WOULD_DEADLOCK`（**`timeout_ms > 0` 且在 loop 线程或回调内**——owned 下它要等 IO 线程收敛，等待即自锁；`timeout_ms == 0` 不等待，**不返回此码**）、`INTERNAL`（Stopped 下合法） |
 | `iocomm_runtime_stop` | `STALE_HANDLE`、`TIMEOUT`、`WOULD_DEADLOCK`（**loop 线程或回调内**且 `timeout_ms > 0`——它要等 IO 收敛，等待即自锁；`timeout_ms == 0` 不等待，**不返回此码**）、`INTERNAL`（Stopped 下幂等） |
 | **Stopped 下的其余写操作**（`runtime_start` / `endpoint_create` / `connect*` / `subscribe` / `*_send*` / `discovery_start` / `monitor_open` 等） | `CLOSED`（Runtime 已停止接受写；Stopped 不可重启，恢复需重建 Runtime；见 §4 状态机）。**只读查询不受影响**（`conn_status` / `stats_snapshot` / `endpoint_count` / `endpoint_get` / `discovery_snapshot_*` / `diagnostic_dump` 等照常） |
 | `iocomm_runtime_run_once` / `iocomm_runtime_run_for` | `STALE_HANDLE`、`INVALID_STATE`（**owned 模式**下调用）、`INTERNAL`；**`run_once` 另有 `TIMEOUT` = 本轮空闲**（正常事件，非故障，见下方注释）。**与 Runtime 状态无关**——manual 模式下 Created / Running / Stopped 均可调用（Stopped 下用于排空） |
@@ -178,7 +179,7 @@ const char* iocomm_strerror(int32_t code);  /* 静态存储期，不要 free */
 | `iocomm_runtime_node_id` | `STALE_HANDLE`、`INVALID_ARGUMENT`（`out_node_id` 为 NULL，按 §3.2 通用出参规则）、`CLOSED`（Runtime 已 Stopped）、`INTERNAL` |
 | `iocomm_runtime_node_name` | `STALE_HANDLE`、`INVALID_ARGUMENT`（`buf` / `out_len` 为 NULL）、`RESOURCE_EXHAUSTED`（缓冲不足，`out_len` 给所需长度）、`INTERNAL` |
 | `iocomm_endpoint_create` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`ALREADY_EXISTS`（**同进程**已持有同名端点）、`CONFLICT`（端点名已被**他进程**占用）、`RESOURCE_EXHAUSTED`、`NOT_SUPPORTED`（未知 transport / 平台不支持）、`INTERNAL` |
-| `iocomm_endpoint_destroy` / `iocomm_conn_destroy` / `iocomm_conn_abort` | `STALE_HANDLE`、`WOULD_DEADLOCK`（**回调内销毁非本回调交付的连接 / 订阅**，见 §6.4 回调规则 `@forbid`；销毁**本回调交付的**连接是 §6.4 `@special` 允许的，不返回此码）、`INTERNAL` |
+| `iocomm_endpoint_destroy` / `iocomm_conn_destroy` / `iocomm_conn_abort` | `STALE_HANDLE`、`WOULD_DEADLOCK`（**两种情况**：① 回调内调 **`iocomm_endpoint_destroy`**——`@forbid` 无条件禁止，`@special` 无对应例外；② 回调内销毁**非本回调交付的**连接 / 订阅。销毁**本回调交付的**连接是 `@special` 允许的，不返回此码。见 §6.4 回调规则）、`INTERNAL` |
 | `iocomm_runtime_wakeup` | **无错误通道**（AC-95 豁免）；返回值为错误码，无 `err` 出参 |
 | `iocomm_endpoint_lookup` / `iocomm_endpoint_get` / `iocomm_conn_get` / `iocomm_discovery_snapshot_get` | `STALE_HANDLE`、`NOT_FOUND`、`INVALID_ARGUMENT`、`INTERNAL`（`snapshot_get` 另有 `NOT_FOUND` = index 越界） |
 | `iocomm_conn_count` / `iocomm_discovery_snapshot_count` | `STALE_HANDLE`、`INTERNAL`（走 `err`；出错返回 0 并置 `err`） |
@@ -347,13 +348,24 @@ int32_t iocomm_runtime_start(iocomm_runtime_t rt, iocomm_error* err);
  * **manual 模式怎么等**（2026-11-05）：`timeout_ms > 0` 时要等 loop 收敛，因此在 **loop 线程上调用会自锁** ——
  *   返回 `WOULD_DEADLOCK`（矩阵见 §3.2.1）。两种正确用法：① loop 线程上 `stop(rt, 0)`，随后用 `run_once` / `drain` 排空；
  *   ② **另一线程** `stop(rt, timeout_ms > 0)`，loop 线程同时继续驱动 `run_once`。
- *   `drain` **不受此限**——manual 模式本就要求它在 loop 线程上调用（见下）。 */
+ *   **`drain` 同受此限**（`timeout_ms > 0` 且 loop 线程 → `WOULD_DEADLOCK`）；但 manual 模式本就要求
+ *   传 `timeout_ms = 0` 在 loop 线程上交替 `run_once` 调用（见下），故 `drain(0)` 正常可用。 */
 int32_t iocomm_runtime_stop (iocomm_runtime_t rt, uint64_t timeout_ms, iocomm_error* err);
 
 /* 优雅关闭：owned 模式返回时保证已排空；
  * manual 模式返回 ICOMM_ERR_WOULD_BLOCK 表示仍有在途操作——
  * 调用方在**外部循环**里交替调 `run_once` 与 `drain`，**直到 `drain` 返回 `ICOMM_OK`**
- * （判据是 `drain` 的返回值，不是 `run_once` 的——`run_once` 空闲时返回 `TIMEOUT`，见 §4）。 */
+ * （判据是 `drain` 的返回值，不是 `run_once` 的——`run_once` 空闲时返回 `TIMEOUT`，见 §4）。
+ *
+ * **`timeout_ms` 的两种口径**（2026-11-05，N-53）：
+ *  - **owned 模式**：等待至多在途操作完成，等满仍不收敛返回 `ICOMM_ERR_TIMEOUT`（此时**不保证已排空**）。
+ *    在 loop 线程 / 回调内且 `timeout_ms > 0` 会自锁，返回 `WOULD_DEADLOCK`（矩阵见 §3.2.1）。
+ *  - **manual 模式**：`timeout_ms` **不推进 loop**——loop 只由调用方的 `run_once` 推进，
+ *    `drain` 无法自己让它前进。**按架构 §3.2 传 `0`**，由调用方的外部循环决定总时长；传非 0 不报错
+ *    （不返回 `INVALID_ARGUMENT`）。
+ *    **注意（2026-11-09 复核）**：`timeout_ms > 0` 在 loop 线程上**仍按矩阵返回 `WOULD_DEADLOCK`**
+ *    （统一口径：等待即自锁；库不区分「等待能否产生效果」）。故 manual 模式的唯一可行形态是
+ *    **`drain(0)` + loop 线程**。 */
 int32_t iocomm_runtime_drain(iocomm_runtime_t rt, uint64_t timeout_ms, iocomm_error* err);
 
 /* 热重配置：只接受**通信参数**，不接受业务参数。
@@ -607,7 +619,9 @@ int32_t iocomm_endpoint_create(iocomm_runtime_t rt,
  *     逐条产生 `DROPPED(PEER_GONE)`（若有监控者）。出站成员连接的消息已随第 3 条迁移，**不在此列**。
  *  8. 函数返回后句柄立即失效；重复调用返回 `STALE_HANDLE`。
  *  **不阻塞**；线程要求与 `conn_destroy` 相同——任意线程可调用，但同一对象的创建/销毁
- *  由调用方串行化（架构 §3.3）。 */
+ *  由调用方串行化（架构 §3.3）。
+ *  **「任意线程」不含回调内**（2026-11-09 复核）：回调内调用返回 `WOULD_DEADLOCK`（`@forbid`
+ *  无条件禁止销毁端点，见 §6.4）。二者不冲突——前者讲**线程**，后者讲**回调上下文**。 */
 int32_t iocomm_endpoint_destroy(iocomm_runtime_t rt, iocomm_endpoint_t ep,
                                 iocomm_error* err);
 
@@ -1374,9 +1388,14 @@ void iocomm_message_release(iocomm_message* msg);
          同步入口据此判别 `WOULD_DEADLOCK`（见 [架构 §3.3](../architecture.md)）。
 @lifetime 回调参数中的指针/切片只在本次回调期间有效
          （例外：明确标注「静态存储期」的字符串可长期缓存）。
-@forbid  阻塞；runtime_destroy / endpoint_destroy / runtime_stop / runtime_drain；
-         销毁**非本回调交付的**连接/订阅。
+@forbid  阻塞型调用；销毁**非本回调交付的**连接/订阅；**销毁端点**（`endpoint_destroy`）。
          违反一律返回 ICOMM_ERR_WOULD_DEADLOCK，**而不是死锁**。
+         **`timeout_ms == 0` 的 `runtime_stop` / `runtime_drain` 不返回该码**——它们不等待，不会自锁
+         （矩阵见 §3.2.1；`drain(0)` 在 manual 模式下本就是正常用法）。**是否**在回调内这么做由调用方自行判断，
+         本条只消除「矩阵说不返回、本段说一律返回」的矛盾。
+         **`timeout_ms > 0` 时两者仍属本项**：等待即自锁。
+         **`runtime_destroy` 返回 void、没有错误通道**——它不属「返回某个码」的情形，而是
+         **不得在回调内调用**（行为未定义）；请在回调返回后再销毁 Runtime。
 @special 以下调用**允许**，但语义特殊：
          - `unsubscribe(本订阅)`         → ICOMM_OK；本次回调跑完后不再触发
          - `conn_destroy(本回调的 conn)` → ICOMM_OK（accept 回调内为拒绝；订阅回调内为关闭）。

@@ -153,7 +153,7 @@ manual 模式下**只有一个宿主线程**在驱动 loop。因此：
 > **异步发送与句柄销毁的竞态**：异步发送只接收**连接句柄或端点句柄**，内部先做代际校验再入队；调用方必须保证「不再对某对象发起异步操作之后」才销毁它。文档写死这条顺序，**不做隐式同步**——与 ZeroMQ / Asio 的惯例一致。
 
 > **线程检测的生产语义**：`WOULD_DEADLOCK` 是**生产行为**，不是调试断言。实现方式是：Runtime 在首次 `run_once`（manual）或启动 IO 线程（owned）时记录 loop 线程 ID；该 ID 在 `stop` 前保持不变。
-> **比对范围 = 矩阵里列了 `WOULD_DEADLOCK` 的那些入口**（阻塞型同步 API：`conn_send` / `endpoint_send` / `*_recv` / `connect` / `conn_close_graceful` / `unsubscribe` / `monitor_poll` / `runtime_stop`（`timeout_ms > 0`）/ `*_destroy` / `conn_abort` 等）。
+> **比对范围 = 矩阵里列了 `WOULD_DEADLOCK` 的那些入口**（阻塞型同步 API：`conn_send` / `endpoint_send` / `*_recv` / `connect` / `conn_close_graceful` / `unsubscribe` / `monitor_poll` / `runtime_stop` / `runtime_drain`（后两者仅 `timeout_ms > 0`）/ `*_destroy` / `conn_abort` 等）。
 > **不比对**的是非阻塞注册类入口（`endpoint_accept` / 两个 `*_condition_subscribe` / `conn_subscribe` / `subscribe`）与 `conn_retain`——
 > 它们标「否」的含义是「**调用方须串行化**」：违反时行为**未定义**——库不保证检测、不保证崩溃、不保证返回某个码（与 libc 的非线程安全函数同口径）。
 > 注意这与 FR-1.6「句柄失效绝不 UB」**不冲突**：那条讲的是**句柄有效性**（库必须返回 `STALE_HANDLE`），
