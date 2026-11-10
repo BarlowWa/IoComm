@@ -1574,6 +1574,16 @@ struct iocomm_peer_status {
     uint8_t config_current;
     uint32_t reserved1;
 
+    /* 时间戳：**系统单调时钟原值**（2026-11-10 定，架构 §6.5）。
+     * 具体时钟：Linux `CLOCK_BOOTTIME`（计挂起）/ Windows `QueryPerformanceCounter`（计挂起）。
+     * 原点为**系统 boot**，**不归一化到 Runtime / 进程创建时刻**——故**同机跨进程可比**
+     * （调用方调同一平台 API 即可算差值），但**不跨机、跨重启不可比**。
+     * 用途是算差值（`now_mono - last_rx_ns` = 距上次收到多久），**不是**给人当日期读。
+     * **计挂起是刻意的**：休眠期间网络已断，不计挂起会让恢复后的心跳超时检测失效。
+     * 从未收到过（或从未收到过心跳）时为 **0**——这是「未发生」的唯一判据。
+     * **0 不会被合法时间值撞上**：Linux `CLOCK_BOOTTIME` 自 boot 起即非 0；Windows `QueryPerformanceCounter`
+     *   按 MS Learn 在 Windows XP 及之后不返回 0。故 0 作哨兵是安全的。
+     * 需要人读口径请看 `iocomm_diagnostic_dump` 的 `last_rx_age_ms` / `last_heartbeat_age_ms`（库已算好差值）。 */
     uint64_t last_rx_ns;
     uint64_t last_heartbeat_ns;
     uint64_t reconnect_count;
@@ -1648,18 +1658,45 @@ int32_t iocomm_stats_snapshot(iocomm_runtime_t rt, iocomm_stats* out,
 
 /* 诊断 dump：返回 JSON 文本，调用方用 iocomm_free_text 释放。
  * v1 结构（FR-5.5；验收 AC-94）：
- *   { "version": 1,
- *     "connections": [ { "conn": <u64>, "peer_node_id": <u64>, "connected": <bool>,
- *                        "recv_queue_depth": <i64> }, ... ],
+ *   { "version": 2,
+ *     "connections": [ {
+ *         "conn": <u64>, "ep": <u64>, "peer_node_id": <u64>,
+ *         "connected": <bool>, "lively": <bool|null>, "healthy": <bool|null>,
+ *         "config_current": <bool>,
+ *         "last_rx_ns": <u64>, "last_heartbeat_ns": <u64>,
+ *         "last_rx_age_ms": <u64>, "last_heartbeat_age_ms": <u64>,   /* 可选键，见下方口径 */
+ *         "reconnect_count": <u64>,
+ *         "send_queue_depth": <i64>, "recv_queue_depth": <i64>
+ *     }, ... ],
  *     "endpoints":   [ { "ep": <u64>, "name": <string>, "conn_count": <u32>,
  *                        "send_queue_depth": <i64> }, ... ] }
- * `send_queue_depth` **在端点对象里**（2026-11-05，N-40）：成员连接共用该端点的一条发送队列
- *   （§6.1「队列归属规则」），逐连接无定义。**例外**：`ep_owner == 0` 的出站连接各自一条发送队列（§6.1 同一清单末项），
- *   它们**不在任何端点**下，其发送队列深度**不出现在本 dump 中**——这是 v1 的已知盲区，
- *   记入 [open-questions N-47](../open-questions.md) 随 per-connection 指标一并评估。
- * `recv_queue_depth` 每连接一条（§6.1），故留在 `connections` 里。
+ *
+ * **本 dump 是 v1 唯一的「线程安全连接枚举」入口**（2026-11-09，D-2 裁决）：
+ *   `conn_count` / `conn_get` 仅限 loop 线程（§3.3、§7），owned 模式下应用线程不可调用；
+ *   需要从任意线程取「当前全部连接」时，**用本 dump**（`@errors` 见 §3.2.1，线程属性见 §3.2.1）。
+ *   逐连接的更细信息（`peer_status` 全部字段）可再对每个 `conn` 调 `iocomm_conn_status`。
+ * 不提供 `conn_snapshot_*` 系列的快照句柄 API：业界同族库（libuv / Asio / libevent / ZeroMQ /
+ *   NNG / DDS / iceoryx / ROS 2）均未提供「从任意线程同步枚举连接」的专用入口，而是「事件流 + 值快照」；
+ *   本库已两者兼备（monitor 事件流 / 本 dump），故不新增导出函数。取舍理由见 `open-questions.md` §9.4 N-46。
+ *
+ * **字段口径**：
+ * - `ep`：连接所属端点；`ep_owner == 0` 的**无主出站连接**为 `0`。
+ * - `lively` / `healthy`：`<bool>` 或 `null`；**`null` = `ICOMM_COND_UNKNOWN`**（如自动重连后的心跳窗口未满，
+ *   见 `iocomm_peer_status` 注释）。`connected` 不用 `null`——它只在有句柄时才可观测，`false` 即确知未连通。
+ * - `last_rx_ns` / `last_heartbeat_ns`：**原样转发** `iocomm_peer_status` 的同名字段——**系统单调时钟原值**
+ *   （Linux `CLOCK_BOOTTIME` / Windows QPC，**计挂起**，原点 = 系统 boot），**同机跨进程可比**，
+ *   不跨机、跨重启不可比。保留原始值是为了让调用方能拿同一平台 API 自己做阈值判断。
+ * - `last_rx_age_ms` / `last_heartbeat_age_ms`：库在**本次 dump 时刻**算好的差值 `now_mono - last_*_ns`
+ *   （毫秒）。这是**给人读的口径**——直接回答「多久没收到消息了」，**不需要**调用方持有同源时钟。
+ *   **对应的 `last_*_ns == 0`（从未发生）时该键省略**，而不是写 0——否则「从未」与
+ *   「刚刚」无法区分。**`*_age_ms` 与 `last_*_ns` 冗余**，读取方选其一即可。
+ * - `send_queue_depth`：**成员连接报其所属端点共享队列的深度**（§6.1「队列归属规则」）——
+ *   同一端点的所有成员连接报**同一个值**，聚合时**不可相加**；`ep_owner == 0` 的出站连接报**自己**队列的深度。
+ *   （2026-11-09，D-2：后一情形此前是观测盲区，随本次补全关闭，见 `open-questions.md` N-47。）
+ * - `recv_queue_depth`：**每连接一条**（§6.1），可直接按连接读。
+ *
  * 键名与类型属**契约**；新增键只允许在顶层与对象内追加（读取方忽略未知键）。
- * **例外（2026-11-05，N-40）**：`send_queue_depth` 从 `connections[]` **移到** `endpoints[]`，属**一次性的破坏性字段搬移**，不适用「只追加」规则——本库尚未发布（M0 未冻结），无兼容负担；**发布后**再要搬移字段就必须升 ABI major。
+ * **例外（2026-11-05，N-40；2026-11-09，D-2 部分回退）**：`send_queue_depth` 曾从 `connections[]` **移到** `endpoints[]`（属一次性的破坏性字段搬移，本库尚未发布故无兼容负担）；D-2 裁决后在 `connections[]` **恢复同名字段**，两处并存——`endpoints[]` 的仍为端点级唯一值，`connections[]` 的仅是同一队列的逐连接读数（见上方字段口径）。
  * 「最后 N 条错误」属 v1.1（FR-5.5b）。 */
 int32_t iocomm_diagnostic_dump(iocomm_runtime_t rt, char** out_text,
                                uint64_t* out_len, iocomm_error* err);
@@ -1753,7 +1790,12 @@ typedef struct iocomm_mon_record {
 
     uint64_t capture_id;        /* **本记录在监控环中的唯一 ID，永不复用** */
     uint64_t seq;               /* 每来源发送操作单调（扇出时同一 send 的多条记录共享该 seq） */
-    uint64_t ts_mono_ns;        /* 单调时钟：时延与排序 */
+    uint64_t ts_mono_ns;        /* 单调时钟：时延与排序。**与本进程内 `iocomm_peer_status.last_*_ns` 同一零点**
+                                 * （系统 boot，Linux `CLOCK_BOOTTIME` / Windows QPC；**计挂起**），
+                                 * 故同一 Runtime 内的两者可直接相减（架构 §6.5 / §6.5a）。
+                                 * **同机不同 Runtime 的相减不在契约内**——`last_*_ns` 来自**对被监控连接**的观测
+                                 * （可能是远端节点），与本进程的 `ts_mono_ns` 不同源；跨节点时间比较一律不可信。
+                                 * **不跨机、跨重启不可比**。 */
     uint64_t ts_wall_ns;        /* 墙钟：仅用于人读与本地对齐，**不可跨机比较** */
 
     uint64_t src_node;

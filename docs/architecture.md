@@ -78,7 +78,7 @@ poll（任意线程，同一 monitor 串行）→ 取记录 → 调用方消费
 - `Transport`：tcp / unix-socket / named-pipe / inproc（udp 为 v1.1）
   > `inproc` 不参与发现：`publish_local = 1` 时 `endpoint_create` 返回 `INVALID_ARGUMENT`（见 [需求 FR-3.9](requirements.md)）
 - `Discovery`：multicast / unicast-seed / local-registry（本机注册表的机制见 §6.4b）
-- `Clock`：生产用稳态时钟；测试用假时钟
+- `Clock`：生产用**计挂起的单调时钟**（Linux `CLOCK_BOOTTIME` / Windows QPC，见 §6.5）——**不是** `Instant::now()` 的薄包装；测试用可注入的假时钟（须能模拟时间跳跃）
 - `Transport` 的测试实现：`FakeTransport`（内存队列 + 故障注入）
 
 ---
@@ -126,7 +126,7 @@ manual 模式下**只有一个宿主线程**在驱动 loop。因此：
 |---|---|
 | `Runtime` / 端点 / 连接 / 订阅的**创建与销毁** | 否（调用方串行化）。**注意**：本行指**对象生命周期**；下文单独列出的注册类入口（`endpoint_accept` / 两个 `*_condition_subscribe`）另有属性 |
 | `run_once` / `run_for` | 否（仅 loop 线程）。**`run_once` 返回 `TIMEOUT` = 本轮空闲**（正常事件，非故障，C ABI §4） |
-| 端点/连接/订阅的 `count/get` | 否（loop 线程或串行化） |
+| 端点/连接/订阅的 `count/get` | 否（loop 线程或串行化）。**owned 模式下应用线程不在 loop 上、也无从「串行化」，故调用即违反本契约（UB）**；需要从任意线程枚举连接时用 `iocomm_diagnostic_dump`（跨线程安全，见下行），再对每个 `conn` 调 `conn_status`——2026-11-09，D-2 |
 | `*_send_async` / `connect*_async` / `runtime_wakeup` | **是**（内部投递到 loop） |
 | `conn_send` / `endpoint_send` / `*_recv` / `unsubscribe`（同步） | 否（一句柄一线程；loop 线程调用返回 `WOULD_DEADLOCK`。**唯一例外**：在**本订阅自己的回调内**用 `unsubscribe` 取消本订阅 → `ICOMM_OK`，见 C ABI §6.4 `@special` 与 AC-5） |
 | `runtime_reconfigure` | **是**（内部投递到 loop，异步生效） |
@@ -147,8 +147,7 @@ manual 模式下**只有一个宿主线程**在驱动 loop。因此：
 > 要么自锁，要么返回矩阵未列的码。故归入与同族 `subscribe` / `conn_subscribe` **完全一致**的口径：
 > **调用方串行化，或在 loop 线程上调用**（loop 线程调用合法且是内联执行，不会自锁）。
 > 代价是「另一线程注册」不可用——与 `subscribe` 的既有代价相同，不是新增限制。
-> `conn_count` / `conn_get` 属「否」——外部监控线程若需枚举连接，应把枚举放进 loop 线程
-> （manual 模式下就是驱动 `run_once` 的那个线程），或按 `open-questions.md` **N-46** 的裁决改用快照 API。
+> `conn_count` / `conn_get` 属「否」——外部监控线程若需枚举连接，**用 `iocomm_diagnostic_dump`**（跨线程安全，逐条目含连接状态与队列水位，见 C ABI §8 注释），再按句柄调 `conn_status` 取完整 `peer_status`。**不要**把 `conn_count` / `conn_get` 放进「另一线程 + 投递到 loop」的绕法：本库没有「同步投递进 loop 并阻塞等待」的原语（业界同族库也都没有，见 `open-questions.md` N-46）。loop 线程上（manual 模式主循环、任一回调内）仍可直接用 `count` / `get`。（2026-11-09，D-2 裁决）
 
 > **异步发送与句柄销毁的竞态**：异步发送只接收**连接句柄或端点句柄**，内部先做代际校验再入队；调用方必须保证「不再对某对象发起异步操作之后」才销毁它。文档写死这条顺序，**不做隐式同步**——与 ZeroMQ / Asio 的惯例一致。
 
@@ -181,6 +180,9 @@ mio::Poll
 - **不绑 tokio**：tokio 会拥有线程与调度器，与本库「调用方驱动」的要求冲突。
 - 跨线程投递用**无锁队列 + 唤醒 fd**（Windows 用 `IOCP` 的 post 机制或 event）。
 - **计时器**：最小堆 + 单调时钟。所有超时经 `Clock` trait，测试可注入。
+  **`Clock` 的生产实现不得是 `Instant::now()` 的薄包装**——Linux 上 `Instant` 落 `CLOCK_MONOTONIC`（不计挂起）、
+  Windows 上落 `QueryPerformanceCounter`（计挂起），语义相反。生产实现须在 Linux 绑
+  `clock_gettime(CLOCK_BOOTTIME)`、Windows 绑 `QueryPerformanceCounter`，见 §6.5。
 
 ---
 
@@ -508,8 +510,52 @@ Message {
 
 | 用途 | 时钟 |
 |---|---|
-| 超时 / 心跳 / RTT / 退避 | **单调时钟**（`steady_clock` 语义） |
+| 超时 / 心跳 / RTT / 退避 | **单调时钟，且必须计入系统挂起时间**（见下方「为什么必须计挂起」） |
 | 事件时间戳 / 日志 | 挂钟（附同步状态标志） |
+| **结构体里供调用方算差值的时间戳**（`iocomm_peer_status.last_rx_ns` / `last_heartbeat_ns`、`iocomm_mon_record.ts_mono_ns`） | **同一种单调时钟原值**（系统级，**不归一化到 Runtime / 进程创建时刻**）——见 §6.5a |
+
+**选用的具体时钟（2026-11-10 定）**：
+
+| 平台 | API | 计挂起 | 跨进程可比 | 原点 |
+|---|---|---|---|---|
+| Linux | **`clock_gettime(CLOCK_BOOTTIME)`** | ✅ | ✅（system-wide） | 系统 boot |
+| Windows | **`QueryPerformanceCounter`** | ✅ | ✅（本机两进程实测成立；MS Learn 亦明确「consistent across all processors in multi-core and multi-processor systems, even when measured on different threads or processes」，例外仅限 Pre-Windows Vista） | 系统 boot |
+
+**为什么不直接写「单调时钟（`steady_clock` 语义）」**：这个措辞**不够**，因为它没排除「不计挂起」的实现，而这恰恰是默认行为。
+
+**为什么必须计挂起**：
+
+| 场景 | 计挂起的时钟 | 不计挂起的时钟 |
+|---|---|---|
+| 机器休眠 1 小时后恢复 | `now - last_rx` ≈ 1 小时 → **心跳超时、断开、重连** ✅ | `now - last_rx` ≈ 几秒 → **误判连接仍活着** ❌ |
+
+休眠期间网络早已中断（对端可能已死，交换机老化表项）。**不计挂起 = 半开连接检测失效，连接会僵住。**
+
+**两个平台的默认实现恰好相反，这是本项最危险的地方**：
+
+- Linux `CLOCK_MONOTONIC` **不计**挂起；`CLOCK_BOOTTIME` 才计（`clock_gettime(2)` 原文：`CLOCK_BOOTTIME` "is identical to CLOCK_MONOTONIC, except that it also includes any time that the system is suspended"）。
+- Windows `QueryPerformanceCounter` **计**挂起（2026-11-10 本机实测：QPC 与 `QueryUnbiasedInterruptTime` 相差 4940 秒，与事件日志记录的累计睡眠 83.6 分钟吻合）。
+
+**因此不能直接用 Rust 的 `std::time::Instant`**：它在 Linux 上落 `CLOCK_MONOTONIC`（不计挂起）、在 Windows 上落 QPC（计挂起），**跨平台语义不一致**（`std` 文档明言「it is also not specified whether system suspends count as elapsed time or not. The behavior varies across platforms and Rust versions」）。库的 `Clock` trait（见 §5）必须在各平台绑到上表所列 API，**不得实现为 `Instant::now()` 的薄包装**。
+
+> **与 Rust `Instant` 的另一处差异**：`Instant` 是 opaque 的（`std` 文档：「There is no method to get "the number of seconds" from an instant」），且 Windows 实现额外加了 `u64::MAX/4` 的固定偏移。而 `peer_status.last_rx_ns` 要暴露**可供调用方同源比较**的绝对值，故必须走平台 API 取原值。
+
+### 6.5a 单调时间戳的**原点**——为什么不归一化到 Runtime / 进程创建时刻
+
+> **术语澄清**：本节讨论的是「单调时钟的零点选在哪」，与分布式系统里的**向量时钟**（Lamport / vector clock，用于 happened-before 排序）**无关**——本库不提供跨节点因果序。
+
+同一台机器上，`last_rx_ns` 有三个候选原点：
+
+| | A. Runtime 创建时刻 | B. 进程启动时刻 | **C. 系统单调钟原值** |
+|---|---|---|---|
+| 调用方能否算出「多久以前」 | ❌ 拿不到 Runtime 的零点 | ❌ 拿不到进程启动时刻 | ✅ 调同一平台 API 即同源 |
+| 多个 Runtime 并存（AC-80 允许） | 每 Runtime 一套零点，**不可互比** | 同进程一致 | ✅ 全一致 |
+| 同机跨进程 | ❌ | ❌ | ✅ |
+| 实现复杂度 | 每个 Runtime 存 epoch + 每次减法 | 全局存一次 epoch + 每次减法 | **零**（直接转纳秒） |
+
+**决定性的是第一行**：归一化后调用方**永远拿不到那个零点**，于是 `last_rx_ns` 只剩「A < B 表示 A 更早」一种用法——而这正是同一份 dump 里 `last_rx_age_ms` 已经直接给出的信息。**字段本身会变成冗余。**
+
+因此选 **C**。这也让 `peer_status.last_*_ns` 与 `mon_record.ts_mono_ns` **共享同一零点**，同一份诊断输出里不会出现两套不可比的单调值。
 
 **排序以序号为权威，不以时间戳为权威**（跨机挂钟不可信）。
 
@@ -529,7 +575,7 @@ Message {
 | # | 要求 | 接口表现 |
 |---|---|---|
 | T1 | 事件循环可手动驱动 | `iocomm_runtime_run_once()` / `iocomm_runtime_run_for()`（**没有 `run_until`**，D-10） |
-| T2 | 时间可注入 | 所有超时经 `Clock` trait；内核零处直接读时钟 |
+| T2 | 时间可注入 | 所有超时经 `Clock` trait；内核零处直接读时钟。**`Clock` 的注入须能模拟「时间跳跃」**——测试「休眠恢复后心跳超时触发」要求假时钟能一次前进 N 分钟（对应生产环境的计挂起单调钟，见 §6.5） |
 | T3 | 传输可替换 | `Transport` trait；`FakeTransport` 做测试；`inproc` 让 M1 不碰 socket 也能验完整个模型 |
 | T4 | 端口可协商 | `listen(0)` 后 `local_port()` 可读 |
 | T5 | 线程归属可校验 | 调试构建下检查归属线程，违反返回错误 |
@@ -599,8 +645,8 @@ enum ErrorCode {
 |---|---|---|---|
 | **M0** | 骨架 | C ABI 头（C99 可编译）+ crate 划分 + CI 三平台构建 | AC-P1 / AC-P5 / AC-18 / AC-24 / AC-35 / AC-95 |
 | **M1** | inproc 闭环 | 句柄表（代际）+ Runtime + 端点/连接模型 + **跨进程名字表（§6.4）** + **端点名格式/长度校验（§c-abi 5.1a）** + **手动驱动语义（`run_once` / `run_for`）** + `inproc` 传输（FR-3.5–3.10） | AC-4 / AC-11 / AC-25 / AC-32 / AC-33 / AC-36 / AC-40 / AC-80 / AC-81 / AC-82 / AC-83 / AC-84 / AC-89 / AC-100 / AC-102 / **AC-108** / **AC-109** / **AC-111** / **AC-114** / **AC-115** / **AC-116** / **AC-120** |
-| **M2** | TCP + 双向 | tcp 传输 + accept + connect + send/recv/subscribe + 异步排队超时 + **[线格式](api/wire-format.md)（HELLO 握手 · ERROR 帧 · 尺寸协商）** + **端点级套接字参数（`TCP_NODELAY` / backlog）** | AC-1 / AC-2 / AC-10 / AC-29 / AC-30 / AC-31 / AC-33b / AC-39 / AC-73 / AC-74 / AC-75 / AC-76 / AC-77 / AC-78 / AC-90 / AC-92 / AC-99 / AC-103 / AC-104 / **AC-106** / **AC-110** / **AC-112** / **AC-113** / **AC-117 / AC-118 / AC-119** |
-| **M3** | 状态与监控 | 心跳 + 条件集 + 指标 + 诊断（JSON 结构见 AC-94）+ **消息监控（信封级）** + **自动重连语义** | AC-3 / AC-5 / AC-6 / AC-12 / AC-13 / AC-15 / AC-20 / AC-27 / AC-28 / AC-37 / AC-41 / AC-42 / AC-43 / AC-44 / AC-45 / AC-53 / AC-55 / AC-57 / AC-59 / AC-64 / AC-68 / AC-71 / AC-72 / AC-86 / AC-91 / AC-94 / AC-101 / **AC-105** / **AC-121** |
+| **M2** | TCP + 双向 | tcp 传输 + accept + connect + send/recv/subscribe + 异步排队超时 + **[线格式](api/wire-format.md)（HELLO 握手 · ERROR 帧 · 尺寸协商）** + **端点级套接字参数（`TCP_NODELAY` / backlog）** | AC-1 / AC-2 / AC-10 / AC-29 / AC-30 / AC-31 / AC-33b / AC-39 / AC-73 / AC-74 / AC-75 / AC-76 / AC-77 / AC-78 / AC-90 / AC-92 / AC-99 / AC-103 / AC-104 / **AC-106** / **AC-110** / **AC-112** / **AC-113** / **AC-117 / AC-118 / AC-119** / **AC-122** |
+| **M3** | 状态与监控 | 心跳 + 条件集 + 指标 + 诊断（JSON 结构见 AC-94）+ **消息监控（信封级）** + **自动重连语义** | AC-3 / AC-5 / AC-6 / AC-12 / AC-13 / AC-15 / AC-20 / AC-27 / AC-28 / AC-37 / AC-41 / AC-42 / AC-43 / AC-44 / AC-45 / AC-53 / AC-55 / AC-57 / AC-59 / AC-64 / AC-68 / AC-71 / AC-72 / AC-86 / AC-91 / AC-94 / AC-101 / **AC-105** / **AC-121** / **AC-123** |
 | **M4** | 发现 | 组播 + 单播 seed + 节点身份 + 阶段二端点能力 + **[发现线格式](api/wire-format.md#8-发现报文阶段一--阶段二)** + **`connect_node` 地址解析** | AC-7 / AC-9 / AC-14 / AC-16 / AC-21 / AC-22 / AC-23 / AC-34 / AC-38 / AC-79 / AC-85 / AC-87 / AC-93 / **AC-107** |
 | **M5** | 本机 IPC | Linux unix socket + Windows 命名管道 | AC-P3 / AC-8 / AC-17 / AC-19 / AC-26 / AC-88 |
 | **M6** | 平台与加固 | 麒麟/UOS 实机 + glibc 2.17 基线 + soak | AC-P1 / AC-P2 / AC-P3 / AC-P4 / AC-P5 / AC-E1 / AC-E2 / AC-E3 / AC-E4 / AC-E5 / AC-E6 |

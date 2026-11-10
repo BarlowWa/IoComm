@@ -1,10 +1,10 @@
 # IoComm 待核实问题清单（2026-10-20）
 
-> **⚠️ 最新批次见 [§10 2026-11-05 第二轮复核](#10-2026-11-05-第二轮复核对-039fc19-的验收)——N-53 / N-54 契约缺陷已修，N-55 ～ N-58 已登记**。
-> 上一批 [§9](#9-2026-11-05-用户清单核实n-36--n-52) 的 N-36 ～ N-52 已全部落笔（**N-46 / N-47 / N-48 中期三项仍待负责人裁决**）。
+> **⚠️ 最新批次见 [§10 2026-11-05 第二轮复核](#10-2026-11-05-第二轮复核对-039fc19-的验收)——N-53 / N-54 契约缺陷已修，N-55 / N-57 / N-58 待办，N-56 已闭合，N-59 已核实（降 B4）**。
+> 上一批 [§9](#9-2026-11-05-用户清单核实n-36--n-52) 的 N-36 ～ N-52 已全部落笔（**N-46 / N-47 已于 2026-11-09 裁决；仅 N-48 中期仍待负责人裁决**）。
 > 此前批次：[§8 2026-11-03](#8-2026-11-03-新一轮核实) 的 15 条**全部已处置**（N-01 / N-02 / N-15 按方案 A、N-03 按方案 ①、N-04 ～ N-14 于 2026-11-04 收口），另新增 N-16 / N-17 / N-18 / N-19 四项（均已处置并落文档），不计入原 15 条。**
 > **2026-11-05 补充二**：用户清单核实新增 **[§9 N-36 ～ N-52 十七项](#9-2026-11-05-用户清单核实n-36--n-52)**——其中 **N-36 ～ N-41、N-49 ～ N-52 是 B1/B3 契约缺陷**（多处契约互斥，M0 冻结前必修），
-> N-42 ～ N-45 是「取舍正确但没写清」，N-46 ～ N-48 **须负责人拍板**。与 §8 不同，本节多数是「文档没写」而非「写错」。
+> N-42 ～ N-45 是「取舍正确但没写清」，N-46 / N-47 已于 2026-11-09 裁决，**仅 N-48 中期须负责人拍板**。与 §8 不同，本节多数是「文档没写」而非「写错」。
 >
 > **2026-11-05 补充**：M0 冻结前的残留核对又收口 **N-20 ～ N-35 十六项**（见 [§8.8](#88-2026-11-05-收口核实与裁决n-20--n-35)），其中 N-20 ～ N-25 是**需要先定口径**的，裁决写在该节 8.8a；同样不计入原 15 条。**N-34 为收尾阶段新发现、N-35 为登记项（许可证，待负责人决策）**。
 >
@@ -254,7 +254,7 @@
 6. **N-18 / N-19**（2026-11-04 复审新发现，已定口径、随本批落文档，见 §8.7）。
 7. **N-20 ～ N-35**（2026-11-05 收口核实，见 §8.8）——**已处置（2026-11-05，提交 `39d7ad2`）**：N-20 ～ N-25 六项口径按 §8.8a 裁决落笔、N-26 ～ N-33 直接落笔、N-34 改验收观测通道、N-35 仅登记不落笔；新增 AC-114 / AC-115 / AC-116。
 8. **N-36 ～ N-52**（2026-11-05 用户清单核实，见 [§9](#9-2026-11-05-用户清单核实n-36--n-52)）——**已落笔（2026-11-05）**：
-   N-36 ～ N-41 / N-49 ～ N-52 契约缺陷、N-42 ～ N-45 取舍声明，均已按裁决落文档；**N-46 / N-47 / N-48 中期仍待负责人裁决**（见 §9.4）。
+   N-36 ～ N-41 / N-49 ～ N-52 契约缺陷、N-42 ～ N-45 取舍声明，均已按裁决落文档；**N-46 / N-47 已于 2026-11-09 裁决并落笔，仅 N-48 中期仍待负责人裁决**（见 §9.4）。
 
 ### 8.6 2026-11-04 新增核实（N-16 / N-17）
 
@@ -310,7 +310,7 @@
 | **N-32** | B2 | `c-abi.md:221`、`:931`（`max_message_size` 下限） | 只规定「小于**帧头**（20 B）→ `INVALID_ARGUMENT`」，但必填 TLV 使**最小可用整帧为 56 B**（`20 + 36`）；配 20–55 B 合法却让**所有 `DATA` 必然 `TOO_LARGE`** | 下限改为 **56 B**（`20` 头 + `SEQ`/`TS_SEND`/`SOURCE_NODE` 三项必填 TLV 共 36 B），并注明「低于此值则任何 `DATA` 帧都无法通过校验」。`c-abi.md:221` 的举例与 `§9.3` 同步 |
 | **N-33** | B2 | `c-abi.md:1334`（`node_info.endpoints` 注释）、`:1341-1345`（`iocomm_discovery_event`）；`:1258`（`@lifetime`） | `node_info.endpoints` 注释写「指针有效至下次快照失效」（只对快照路径成立），但 `iocomm_discovery_event` 内嵌 `node_info` 时生命周期只能是「仅本次回调」；`discovery_event` / `node_info` 均无 `size` 字段，字节演进方式未定义 | ① `endpoints` 注释改为「快照路径：有效至 `snapshot_release`；`discovery_event` 路径：**仅本次回调**（见 `@lifetime`）」；② `iocomm_discovery_event` 补注释「生命周期仅本次回调；字节演进只做尾部追加，本结构体**不带 `size`**（v1 不承诺跨版本二进制兼容，宿主须用 `abi_version` 协商）」 |
 | **N-34** | B3 | `requirements.md:341`（AC-86）vs `api/wire-format.md:63`/`:74-75`（收到 `ERROR` 必关连接） | **AC-86 的「注入一次 `ERROR` 帧后 `healthy` 变 `FALSE`」不可可靠观测**：`ERROR` 是终止性帧——发出方必须关连接，接收方进入「终止中」后也关闭。连接一关，`conn_status` 要么句柄失效，要么（出站自动重连）进入 `Reconnecting` 而按 AC-105 报 `UNKNOWN`，`FALSE` 只是一瞬间的中间态，测不稳。 | **改测推送而非拉取**：AC-86 该子项改为「注入 `ERROR` 帧后，`iocomm_condition_fn` **至少推送一次** `healthy = FALSE`（发生在连接关闭前的同一回调序列内）；随后连接断开按 FR-4.4 处理」。理由：`healthy` 的语义是「本判定窗口内收到过 `ERROR`」，窗口在连接生命周期内就要用得上，只有推送通道能在关闭前捕获它。 |
-| **N-35** | B4 | `IoComm/README.md:167` | 许可证一栏写「待定。」——这是**真实的未决项**，但未登记进本清单，状态盘点会漏。 | **不改文档，只登记**：许可证选择属项目负责人决策，不在设计契约范围内。**待负责人确定后**在 `README.md`、各 `Cargo.toml` 的 `license` 字段与仓库 `LICENSE` 文件三处同步。在那之前源码不可对外发布。 |
+| **N-35** | B4 | `IoComm/README.md:170` | 许可证一栏写「待定。」——这是**真实的未决项**，但未登记进本清单，状态盘点会漏。 | **不阻塞当前阶段**（2026-11-09 更新）。已确认：仓库 **private**、**单人负责**、未发布 crates.io、未对外交付、无第三方源码内嵌 ⇒ 三个「后补成本失控」的触发条件（外部贡献者 / 对外分发 / 引入 copyleft 代码）**均未发生**，此时定与写代码后再定成本相同（约 10 分钟，机械替换）。**故维持「待负责人决策」，但从 P1 降为 P3。**<br>**改在下列任一事件发生之前必须定**（写进此条即为触发条件）：① 第一个**外部贡献者**提交 PR 之前（版权将不再单人独占，改许可证需每个贡献者同意）；② 第一次**对外交付 / 发布 crates.io / 装进设备**之前；③ 第一次把**第三方源码**复制进仓库之前（copyleft 传染会反向锁死选择）。<br>**落点三处**（届时同步）：`README.md` 许可证节、各 `Cargo.toml` 的 `license` 字段、仓库根 `LICENSE` 文件。<br>**依赖侧已核实无约束**：`mio` = MIT、`socket2` = MIT OR Apache-2.0（crates.io 元数据实测），均为宽松许可，不传染出站选择。 |
 
 **新增验收项**（8.8a 三项裁决各需一条可构造的用例，归 **M1**：AC-114 用 inproc、AC-115 只用文件系统、AC-116 只需一个 Runtime）：
 
@@ -367,12 +367,12 @@
 | **N-44** | B2 | `wire-format.md:319-320`（仅一行事实陈述「v1 不可配置」）；`requirements.md:243`（只讲跨不可信网段）与 `c-abi.md:1933`（讲进程 / 租户隔离）易被误读为「域在 v2」；`open-questions.md` **原无相关条目** | **多通信域 / 网络级隔离不存在**：组播 `239.255.73.77` + 端口 `47377` 硬编码、名字锁是机器级、无认证无加密 ⇒ 同网段无法有两个互不可见的域。v1「同网段 = 单发现域」与「受控工业局域网 + 不做认证」自洽，判为**取舍**。**行业对照**：ROS 2 / DDS 的 Domain ID 端口公式 `7400 + 250×domainId + …`，上限 232；RTI 原文「**一个域的发现流量对另一域不可见**」；代价明确——ROS 2 实测建议 Linux 只用 0–101 与 215–232（避开临时端口），且 121 个进程即溢出到相邻域端口 | §4 非目标表 / §4.1 安全边界 / `architecture.md` §6.3 / README / `discovery_config` 注释各补一句「**v1 单域；硬隔离请用 VLAN / ACL / 独立网卡 / netns**；域 ≠ 安全边界」。**否掉** v1.1 可配置组播（只做发现层，`connect(addr)` 仍可绕过；同机多组还需 Linux `IP_MULTICAST_ALL=0`）与 v2 `domain_id` + HELLO 校验（6–10 人日、动线格式，无认证时仍非安全边界，应与 TLS 同批） | **C（2026-11-05）** |
 | **N-45** | B2 | `c-abi.md:183` + `:1445-1457`（仅签名与一句「适用于 conn 或 endpoint」）；`requirements.md` FR-5.1 / 5.2（`:102-103`）与 AC-12（`:265`）均无端点级语义 | **`endpoint_condition_subscribe` 事件语义为空**（全文仅 2 次出现）。判为**取舍**（v1 可不实现端点级聚合），但语义空白导致它被误当成「无需逐连接预订阅」的天然答案 | 补语义：**端点级状态订阅 = 对「当前与未来全部成员连接」条件集变化的聚合**，等价于对每个成员连接各订阅一次但**只产生一个订阅句柄**；新成员自动纳入、**不需在 accept 回调补订阅**；**成员离开**：其状态变化照常推送（含最后一次 `connected = FALSE`，**推送先于摘除**），摘除后停止投递；**不额外推送「成员离开」这类独立事件**（上线归 `endpoint_accept`，节点上下线归 `discovery`）。**成员定义 = FR-8.6 扇出集合**；回调 `conn` 与 `ep` 恒非 0，**端点无自身状态、永不以 `conn == 0` 触发**。**否掉**另发上线 / 下线事件：与 `discovery` 的 JOINED/LEFT 及 `accept` 重复，形成第三套观测，且 `iocomm_peer_status` 无承载字段。**待定**：「订阅后是否立刻推一次当前值」须先在连接级 `conn_condition_subscribe` 定死，本项最不确定 | **C（2026-11-05）** |
 
-### 9.4 待裁决（需负责人拍板，本轮不动）
+### 9.4 需负责人拍板（**2026-11-09：N-46 / N-47 已裁决；仅 N-48 中期待定**）
 
 | ID | 议题 | 争点 | 建议 |
 |---|---|---|---|
-| **N-46** | **连接快照 API 做不做** | **两路 agent 结论冲突**。A 路：「独立监控线程拿不到一致视图」→ 应在 v1 新增 `conn_snapshot_take/count/get/release`（**复用已有 `snapshot` 句柄类，不新增第六类**，否则与 N-20 / AC-113 冲突），4–6 人日。B 路：`conn_count(rt, 0)` + `conn_get` 在 **loop 线程**调用完全合法（`architecture.md:127`「loop 线程或串行化」），而工业单线程 manual 模式的应用线程**就是** loop 线程 → 轮询方案成立，v1 只需文档化，v1.1 在 monitor 加 `CONN_OPENED` / `CONN_CLOSED` 两个 kind 值（`kind` 是 `uint16` 枚举，**只追加不改布局**），0.5 人日 | 二者都对，差别在**场景**：manual 单线程轮询可行；**owned 模式 + 独立监控线程**不可行。**待负责人确认该组合是否为 v1 目标场景**。顺带：`diagnostic_dump` 不在 §3.3 线程表却被当「只读查询」用；`conn_count(rt,0)` 被推荐给调用方直读却与 §3.3 标「否」冲突——两项无论选哪条路都要修 |
-| **N-47** | **`iocomm_peer_status` 尾部追加 per-connection 计数** | FR-5.4 六项指标 Runtime 级全有（AC-15 也只测 Runtime 级 RTT），故「无 per-conn」本身是取舍。但 `iocomm_peer_status` 只有条件集 + `last_rx_ns` / `last_heartbeat_ns` / `reconnect_count`，无字节 / 消息 / 丢弃 / 队列深度；唯一每连接水位在 `diagnostic_dump` 的 JSON（字符串分配、粒度粗） | **另登记一条 v1 盲区**：`diagnostic_dump` 改为 `send_queue_depth` 端点级后，`ep_owner == 0` 的出站连接（各自一条发送队列）**没有任何观测通道**——与 FR-5.5「队列水位」的字面要求有落差。若要补，需另加 `orphan_connections[]` 或恢复逐连接水位（后者依赖 per-conn 计数落地）。推荐尾部追加 per-conn 计数。**代价**：尾部追加在「已发布头文件」后仍需升 ABI **minor**（agent 已提示此点）；**否掉**给 `iocomm_stats` 加连接名标签（Prometheus 原文：「One unbounded label … can turn a few hundred thousand series into millions within days」，应按 handle 拉取） |
+| **N-46** | **连接快照 API 做不做** | **两路 agent 结论冲突**。A 路：「独立监控线程拿不到一致视图」→ 应在 v1 新增 `conn_snapshot_take/count/get/release`（**复用已有 `snapshot` 句柄类，不新增第六类**，否则与 N-20 / AC-113 冲突），4–6 人日。B 路：`conn_count(rt, 0)` + `conn_get` 在 **loop 线程**调用完全合法（`architecture.md:127`「loop 线程或串行化」），而工业单线程 manual 模式的应用线程**就是** loop 线程 → 轮询方案成立，v1 只需文档化，v1.1 在 monitor 加 `CONN_OPENED` / `CONN_CLOSED` 两个 kind 值（`kind` 是 `uint16` 枚举，**只追加不改布局**），0.5 人日 | **已裁决（2026-11-09）：A、B 都不采纳——走「补全既有两层」**。方向定位为**面向普通应用**（负责人 2026-11-09 确认）⇒ owned 是默认主路径 ⇒ `conn_count` / `conn_get` 在应用线程上确实不可用（UB），A 路指出的问题成立。但三路独立调研（三路独立调研，结论摘录于本行；报告未入库）一致表明：**业界对「off-loop 看连接状态」的答案不是「同步枚举 API」，而是「事件流 + 值快照」**——libuv `uv_walk` 不可跨线程且全仓无 loop 归属校验、Asio 根本没有枚举入口、ZeroMQ 用 `zmq_socket_monitor` 事件流、NNG 用 `nng_stats_get` 深拷贝值树、DDS 用 built-in topic 订阅、iceoryx 用 introspection 主题、ROS 2 用后台线程维护 `GraphCache`。**「应用线程同步点进 IO 线程取列表」九家调研中一次都没出现**；线程违规的处理上**返回错误码的一个都没有，UB 是压倒性主流**（ZeroMQ 原文「Doing so results in undefined behaviour.」）。IoComm 已有这两层（`monitor_open` 事件流 / `iocomm_diagnostic_dump` 值快照），缺的是**完整性**。<br>**落地（三件，零 ABI 成本）**：① `diagnostic_dump` 的 `connections[]` 补全为 `ep` / `lively` / `healthy` / `config_current` / `last_rx_ns` / `last_heartbeat_ns` / `reconnect_count` / `send_queue_depth` / `recv_queue_depth`（`version` 1→2）；② 架构 §3.3 与 C ABI 的 `conn_count` / `conn_get` 明写 owned 模式下的跨线程调用为 UB 并指向 dump；③ 非目标表补两条（专用快照句柄 API、同步投递进 loop 并阻塞）。把跨线程枚举语义**并进 FR-5.5**（不新增编号）与 **AC-122**（归 M2）。<br>**已否决的备选**：`conn_foreach(rt, fn, user)` 回调枚举（1.5–2 人日）——成本不在工作量而在**合同污染**：它是**调用方线程 + pull** 语义，而本库已有六类回调（`message_fn` / `accept_fn` / `condition_fn` / `discovery_fn` / 三个 `on_done`）全部是 **loop 线程 + push**（`c-abi.md:1386`「@thread 在 Runtime 的事件循环线程上调用」），全库「回调内」出现 58 处；引入第二类回调形会让此后每写一次「回调内允许 X」都得先问「哪个回调」。**也已否决** `buf + cap + out_n` 两次调用形状：踩 `readdir_r` 废弃的第一条理由（接口不允许调用方指定返回项缓冲长度——数组步长由调用方 `sizeof` 决定，结构体尾部追加后老宿主会静默写坏内存），且微软在 `GetAdaptersAddresses` Remarks 里明写两次调用法「strongly discouraged」。**也已否决**把 `conn_count` / `conn_get` 改为线程安全：无锁方案需 epoch/RCU 回收（当前架构无此设施），加锁则违反 `architecture.md:98`「回调无锁」 |
+| **N-47** | **`iocomm_peer_status` 尾部追加 per-connection 计数** | FR-5.4 六项指标 Runtime 级全有（AC-15 也只测 Runtime 级 RTT），故「无 per-conn」本身是取舍。但 `iocomm_peer_status` 只有条件集 + `last_rx_ns` / `last_heartbeat_ns` / `reconnect_count`，无字节 / 消息 / 丢弃 / 队列深度；唯一每连接水位在 `diagnostic_dump` 的 JSON（字符串分配、粒度粗） | **已裁决（2026-11-09）：`peer_status` 不动；盲区改由 dump 关闭**。理由：`peer_status` 同时是 `iocomm_condition_fn` 的**回调载荷**，加计数字段会让每一次状态推送都驮着一组几乎不变的累加值，而条件订阅的语义是「状态变化」；FR-5.4「作用域 = 本 Runtime，无 per-connection 维度」这条已文档化的取舍保持不变。<br>**原登记的盲区**（`ep_owner == 0` 的出站连接各自一条发送队列、不在任何端点下、`send_queue_depth` 不出现在 dump 中）**改由 dump 关闭**：`connections[]` 条目新增 `ep` 与 `send_queue_depth`，无主出站连接报 `ep == 0` 并报**自身**队列深度（与成员连接报「所属端点共享队列深度」并存，同一端点的成员连接报同一值、聚合时不可相加）。已在 C ABI `diagnostic_dump` 注释与 AC-94 / AC-122 落笔 |
 | **N-48** | **`47377..47477` 落在 Linux 默认临时端口段内** | 内核文档 `ip_local_port_range` 示例即 `32000 60999`（主会话已复核）。启动顺序不利时内核可能已把该端口分配给出站 socket → `discovery_start` 因 `bind` 失败返回 `RESOURCE_EXHAUSTED`。**与多域无关，本轮新发现** | 短期：`platform-support.md` §3.3 加 `ip_local_reserved_ports` 运维提示。中期：为「端口可配置」提供独立理由（与 N-44 分开评估） |
 
 ### 9.5 附带发现（主会话已复核）
@@ -391,9 +391,10 @@
 |---|---|---|---|
 | **第一批：契约对齐** | N-36 / N-37 / N-38 / N-39 / N-40 / N-41 / N-49 / N-50 / N-51 | **无**（纯文档自洽，不动设计决策） | 3 人日 |
 | **第二批：如实声明** | N-42 / N-43 / N-44 / N-45 + N-48 短期提示 | 无 | 1 人日 |
-| **第三批：需拍板** | N-46 / N-47 / N-48 中期 | **须负责人裁决**（见 §9.4） | 待定 |
+| **第三批：需拍板** | N-48 中期（N-46 / N-47 已于 2026-11-09 裁决落笔） | **须负责人裁决**（见 §9.4） | 待定 |
 
-> **第三批不得在裁决前落笔**：N-46 决定是否新增 4 个 C ABI 函数，N-47 决定是否升 ABI minor。
+> **第三批不得在裁决前落笔**：只剩 N-48 中期（决定是否给 `iocomm_discovery_config` 加端口字段）。
+> **N-46 / N-47 的裁决结果（2026-11-09，零 ABI 增量）**：把跨线程枚举语义**并进 FR-5.5**（不新增编号）与 **AC-122**，`diagnostic_dump` 的 `connections[]` 补字段并升 `version` 1→2 —— **不改任何 C 结构体、不新增导出函数**。
 > 前两批**没有任何一条**需要动 ABI major、动线格式、或推翻已提交的 ADR；新 AC 编号从 **AC-117** 起（现有最高为 AC-116）。
 > **ABI 面确认干净**（独立 agent 复核）：无新增函数、无新增结构体字段、无新增枚举值；`wire-format.md` 仅一行文字说明。
 
@@ -408,7 +409,8 @@
 | N-36 ~ N-41（契约缺陷） | `c-abi.md` §3.2.1 / §3.1 / §4 / §5.2 / §6.3 / §6.4 / §8；`architecture.md` §3.3；`requirements.md` AC-5/6/29/33/33b/40/94/104/109 + 新增 **AC-117~121** |
 | N-42 / N-43 / N-44 / N-45（取舍声明） | `requirements.md` §4 / §4.1 / FR-5.2/5.4/5.5；`c-abi.md` §4（N-43 推荐形态）/ §7（N-44）/ §9.8（N-42~44 非目标）；`architecture.md` §6.3 / §3.3；`wire-format.md` §8；`platform-support.md` §3.3；`README.md` |
 | N-48 短期 | `platform-support.md` §3.3（`ip_local_reserved_ports`） |
-| N-46 / N-47 / N-48 中期 | **未落笔**，待负责人裁决（§9.4） |
+| **N-46 / N-47**（2026-11-09 裁决） | `c-abi.md`（`diagnostic_dump` 注释补全字段 + `version` 2 + 「v1 唯一的线程安全连接枚举」段）；`architecture.md` §3.3（`count/get` 行 + 监控线程段）；`requirements.md` FR-5.5 扩写（并入跨线程枚举，不新增编号）/ AC-94 重写 / 新增 **AC-122** / §4 非目标补两行 + per-conn 指标行（顺带关闭 N-56 断链）；本文 §9.4 N-46 / N-47 |
+| N-48 中期 | **未落笔**，待负责人裁决（§9.4） |
 >
 > **既有 AC 的实际改动（2026-11-05 复核更正）**：本行原写「AC-104 是唯一一条需要改的」，**不准确**。
 > 实际改动的是 **9 条** —— AC-5 / AC-6（补非阻塞调用例外）、**AC-29 / AC-40**（补「端点级收消息未启用」限定，
@@ -422,7 +424,7 @@
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| **`diagnostic_dump` 的 `ep_owner == 0` 发送水位盲区** | **未闭合（已知，登记在 N-47）** | JSON 改为端点级后，无主的出站连接没有观测通道。补它需要新增 JSON 键（属 ABI 面增量），故与本轮「零 ABI 增量」的目标冲突，**留给 N-47 一并裁决** |
+| **`diagnostic_dump` 的 `ep_owner == 0` 发送水位盲区** | **已闭合（2026-11-09，随 N-47 裁决）** | `connections[]` 条目新增 `ep` 与 `send_queue_depth`：无主出站连接报 `ep == 0` 并报**自身**队列深度。已落 C ABI `diagnostic_dump` 注释、AC-94 与 AC-122 |
 | **端点级条件订阅「订阅瞬间是否补推当前值」** | **未定口径，但已消除矛盾** | 现口径为「与连接级共用同一条规则」，两级不再打架；规则**本身**仍是开放的，由连接级先定 |
 
 > **本节此前若再出现「未闭合」条目，一律先在本表登记再动手**——避免下一轮审查把同一问题当作新发现。
@@ -469,8 +471,9 @@
 | ID | 严重度 | 项 | 说明 |
 |---|---|---|---|
 | **N-55** | B2 | **`iocomm_stats.send_queue_depth` / `recv_queue_depth` 语义零定义** | `c-abi.md` 的 `iocomm_stats` 里，`queue_dropped` / `protocol_errors` / `audit_events` 都有口径注释，唯独这两个裸字段没说「是全 Runtime 聚合还是快照时点瞬时值」。补一句注释即可，不涉 ABI |
-| **N-56** | B3 | **`FR-5.4` 引用「§4 非目标表」是断链** | `requirements.md:105` 指向的 §4 表**没有** per-connection 作用域这一条（只有「跨进程/集中式监控」）。应补一行非目标或改指向 N-47 |
+| ~~**N-56**~~ | ~~B3~~ | ~~**`FR-5.4` 引用「§4 非目标表」是断链**~~ | **已闭合（2026-11-09，随 N-46 / N-47 裁决）**：`requirements.md` §4 非目标表已补「per-connection 的指标维度」一行，说明 FR-5.4 作用域 = 本 Runtime、`peer_status` 为何不带累加计数、逐连接队列水位走 `diagnostic_dump` |
 | **N-57** | B3 | **`runtime_node_id` 在 Stopped 下返 `CLOSED`，与状态机冲突** | 状态机写「只读查询不受影响」，而 `node_id` 是只读；同族 `runtime_node_name` **无**此码。二者应统一 |
 | **N-58** | B3 | **inproc 的心跳 / `healthy` 语义未定义** | `wire-format.md:236-241` 说 inproc 不走帧层、无握手，但**没说跑不跑心跳**；而 `FR-5.1` / AC-86 的 `lively` / `healthy` 判定依赖心跳，也**未限定 transport**。需先定「inproc 跑不跑心跳」，再回写 FR-5.1 与 AC-86 |
+| **N-59** | B4 | **QPC 跨处理器一致性与 tick 粒度** | 2026-11-10 时钟口径定为 Windows 用 `QueryPerformanceCounter`（架构 §6.5）。**跨处理器一致性已核实**：MS Learn《Acquiring high-resolution time stamps》原文——「the performance counter results are **consistent across all processors** in multi-core and multi-processor systems, even when measured on different threads or processes」；列出的例外仅限「**Pre-Windows Vista**」（非不变 TSC / TSC 同步算法不适配大量处理器）。产品最低要求 WS2016，**不落在例外范围内**。多时钟域的大型服务器上 Windows 会退化为 platform counter，原文称「still yields reliable time stamps」但访问延迟与伸缩性变差 | **降为 B4，不再阻塞**。剩余唯一注意事项：**跨线程取的两个 QPC 值相差 ≤ 1 tick 时，先后顺序是模糊的**（原文：「When you compare performance counter results that are acquired from different threads, consider values that differ by ≤ 1 tick to have an ambiguous ordering」；本机 `freq = 14,318,180` ⇒ 1 tick ≈ 70 ns）。心跳/超时的判定窗口是毫秒级，70 ns 的模糊完全可忽略，**不需要在实现里特殊处理**。S1 Spike 可顺带记录本机 `QueryPerformanceFrequency` 值，无需专门做多 NUMA 实测 | **已核实（2026-11-10）** |
 
-> **N-46 / N-47 的范围收窄**（复核发现）：N-46 的顺带项「`diagnostic_dump` 不在 §3.3 线程表」**已修**（`c-abi.md` 已标可跨线程、`architecture.md` §3.3 已补表），只剩「`conn_count` 与 §3.3 标『否』冲突」一项。N-47 的「唯一每连接水位在 dump」**只对发送方向成立**——`recv_queue_depth` 仍逐连接。两者**仍待负责人裁决**，范围按此收窄。
+> **N-46 / N-47 的范围收窄**（复核发现）：N-46 的顺带项「`diagnostic_dump` 不在 §3.3 线程表」**已修**（`c-abi.md` 已标可跨线程、`architecture.md` §3.3 已补表），只剩「`conn_count` 与 §3.3 标『否』冲突」一项。N-47 的「唯一每连接水位在 dump」**只对发送方向成立**——`recv_queue_depth` 仍逐连接。**两项已于 2026-11-09 裁决并落笔**（见 §9.4）。
