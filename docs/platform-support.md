@@ -127,7 +127,7 @@ readelf --version-info libiocomm.so | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail 
 | **版本碎片化**（麒麟 SP1/SP2/SP3；UOS 1050/1060/1070 + A/D/E 底座） | 支持矩阵细化到「产品 + SP + 内核 + glibc」 |
 | **KYSEC 安全模块** | 白名单流程；优先 socket/pipe，不用 SysV IPC |
 | **默认 `nofile=1024`** | 显式 `LimitNOFILE`（systemd） |
-| **默认临时端口段 `32000–60999` 覆盖发现端口**（2026-11-05，N-48） | 发现用的组播 `47377` 与单播段 `47378–47477` **落在 Linux 默认临时端口区间内**（内核文档 `ip_local_port_range` 示例即 `32000 60999`；Windows/macOS 为 `49152–65535`，在其外）。启动顺序不利时内核可能已把该端口分配给出站 socket → `discovery_start` 因 `bind` 失败返回 `RESOURCE_EXHAUSTED`。**缓解**：部署时用 `sysctl -w net.ipv4.ip_local_reserved_ports=47377-47477` **保留**该段，并让发现先于大量出站连接启动 |
+| **临时端口段与发现端口相邻/重叠**（2026-11-05 发现 N-48；**2026-11-10 按 D-4 迁出**） | 发现用的端口块为**组播 `23100` + 单播 `23101..23200`**（[线格式 §8.1](api/wire-format.md) 有选择理由的逐项核对）。**默认配置下不冲突**：Linux `ip_local_port_range` 默认 `32768–60999`、Windows 默认 `49152–65535`，块完全在外。**主要残余风险——`ip_local_port_range` 被人调宽到覆盖 23100 段**（离线加固基线、容器编排方、安全加固脚本都可能这么做）：此时期内核仍可能把该段分给**出站连接自动选源端口**的进程，抢先占走端口 → `discovery_start` 因 `bind` 失败返回 `RESOURCE_EXHAUSTED`。**核对方法**：`cat /proc/sys/net/ipv4/ip_local_port_range`，确认该区间**与 `23100–23200` 无交集**（只比上界不够——区间整体移到更高处同样无交集，却会被「上界 < 23100」误判）。**若确实重叠**：用 `sysctl -w net.ipv4.ip_local_reserved_ports=23100-23200` **保留**该段（与 N-48 短期方案相同的机制，只是端口不同），并让发现先于大量出站连接启动。**另一类冲突不在本行范围**：同机第三方软件若**显式** `bind` 了该段内的某个固定端口，内核保留段也拦不住——按端口块选择时的 IANA 核对（[线格式 §8.1](api/wire-format.md)）只能降低撞上「已注册服务」的概率，不能消除现场自定端口。**反方向**：发现占用 101 个端口、把内核对其它进程的出站端口分配切成两截的问题，随迁移一并消失（前提是 `ip_local_port_range` 未被调宽覆盖本段） |
 | **`/tmp` 1–3 天清理** | socket 文件放 `/run`，不放 `/tmp` |
 | **debuginfo 不可得** | 采购时索取 `kernel-devel` / `kernel-debuginfo` / SRPM |
 | **国产网卡驱动** | 不假设多队列/RSS；提供单队列退化；启动时输出 `ethtool` 自检 |
