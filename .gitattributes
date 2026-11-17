@@ -1,0 +1,35 @@
+# ============================================================
+# 行尾与文本属性
+#
+# 目的：钉死「仓库内一律 LF」，让**同一份提交在任何机器上检出都是同一份字节**。
+#
+# 为什么必须有：Git for Windows 安装时默认 core.autocrlf=true，会按机器/检出
+# 时机把文本转成 CRLF。后果是同一份源码在不同环境字节不同，任何按内容精确匹配
+# 的工具（脚本替换、变异测试、插桩、哈希校验）都会时灵时不灵 —— 而且**失败是
+# 静默的**：正则零匹配、脚本原样返回、测试报「全绿」而实际什么都没做。
+# （本仓的母仓库 My_Tools 已实际踩过这个坑，见其 .gitattributes 的说明。）
+#
+# `eol=` 属性优先级高于 core.autocrlf，故本文件生效后无论 autocrlf 如何设置，
+# 检出的都是 LF。
+#
+# 核对口径：**对象库（blob）里本就是 LF**（`git cat-file -p HEAD:<file>` 的 CR 字节数为 0），
+# 只是本机检出被 autocrlf 转成了 CRLF。故本文件**不需要**配合
+# `git add --renormalize .` —— 索引侧无 CRLF 可重写（已实测：renormalize 后
+# `git status` 无改动）。CRLF 只存在于工作区，重检出即恢复 LF。
+# ============================================================
+
+# 默认：按内容判定为文本，且一律以 LF 检出
+* text=auto eol=lf
+
+# ── 二进制：禁止行尾转换与 diff（否则会破坏文件）──
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+
+# ── Windows 专属脚本必须保持 CRLF：CRLF 是 .bat/.cmd 的行尾约定，
+#    部分解释器对 LF 的 .bat 处理不当 ──
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
