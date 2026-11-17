@@ -198,7 +198,7 @@ const char* iocomm_strerror(int32_t code);  /* 静态存储期，不要 free */
 | `iocomm_conn_send` / `iocomm_endpoint_send` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`、`TOO_LARGE`、`NO_RECEIVER`、`WOULD_BLOCK`、`DISCONNECTED`、`TIMEOUT`、`WOULD_DEADLOCK`、`CLOSED`、`INTERNAL` |
 | `iocomm_conn_send_async` / `iocomm_endpoint_send_async` | 同步返回：`STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`、`TOO_LARGE`、`WOULD_DEADLOCK`、`CLOSED`、`RESOURCE_EXHAUSTED`（`op_id` 空间耗尽，见 §6.2）、`INTERNAL`；其余走 `on_done` |
 | `iocomm_send_cancel` | `STALE_HANDLE`、`NOT_FOUND`（op 已完成）、`INVALID_ARGUMENT`、`INTERNAL` |
-| `iocomm_endpoint_recv` / `iocomm_conn_recv` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`（已 subscribe；**`conn_recv` 另有「该连接已由端点级订阅 / 拉取持有」——此时路由在端点队列，且该情形 `err` 照常填充**，见 §6.4）、`TIMEOUT`、`WOULD_DEADLOCK`、`CLOSED`、`INTERNAL` |
+| `iocomm_endpoint_recv` / `iocomm_conn_recv` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`（已 subscribe；**`conn_recv` 另有「该连接已由端点级订阅 / 拉取持有」——此时路由在端点队列，且该情形 `err` 照常填充**，见 §6.4）、**`DISCONNECTED`（仅 `conn_recv` 的返回码，且仅 inproc 排空窗口：连接已断开且可交付残留已取空——先取空、再报此码，2026-11-13；tcp 上 `conn_recv` 不返回它，重连期间句柄有效、`conn_recv` 按 FIFO 正常返回；与 `on_done(DISCONNECTED)` 是不同通道，后者见 §5.2 取消表）**、`TIMEOUT`、`WOULD_DEADLOCK`、`CLOSED`、`INTERNAL` |
 | `iocomm_discovery_start` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`ALREADY_EXISTS`（已启动）、`NOT_SUPPORTED`、`RESOURCE_EXHAUSTED`、`INTERNAL` |
 | `iocomm_discovery_stop` | `STALE_HANDLE`、`INVALID_STATE`（未启动）、`WOULD_BLOCK`、`TIMEOUT`、`INTERNAL` |
 | `iocomm_discovery_snapshot_take` | `STALE_HANDLE`、`RESOURCE_EXHAUSTED`、`INTERNAL` |
@@ -579,7 +579,8 @@ typedef struct iocomm_endpoint_config {
 /* **端点级套接字参数的非目标（2026-11-04，N-12）**：v1 **不暴露**内核 TCP keepalive 开关
  * （`SO_KEEPALIVE` / `TCP_KEEPIDLE` / `SIO_KEEPALIVE_VALS`）。半开检测由**应用层心跳**承担
  * （FR-5.3，默认 2000 ms × 3）：内核 keepalive 默认 2 小时，且 WS2016 缺 `TCP_KEEPIDLE`，
- * 把它做成配置项只会给调用方一个「以为是快速检测」的假旋钮。需要内核级保活时不在本库范围：
+ * 把它做成配置项只会给调用方一个「以为是快速检测」的假旋钮。**范围**：应用层心跳只覆盖
+ * tcp / unix / pipe；**inproc 两者都不需要**（2026-11-11，D-5 / N-58，见 §5.1b）。需要内核级保活时不在本库范围：
  * 本库不向调用方暴露 fd，无法逐连接设置。 */
 
 /* （原 ICOMM_ENDPOINT_UNIQUE 已移除：跨进程同名一律 CONFLICT，同进程同名 ALREADY_EXISTS，
@@ -595,10 +596,12 @@ int32_t iocomm_endpoint_create(iocomm_runtime_t rt,
 /* 销毁本地端点。语义完整定义如下（此前为空缺）：
  *  1. **名字锁**：立即释放跨进程名字锁（§architecture 6.4），其他进程可马上注册同名端点；
  *     本 Runtime 内同名端点也可立即重建。
- *  2. **入站连接**（本端点的**成员连接**）：全部以 FIN 优雅关闭（不是 RST）；这些连接上的订阅失效，
+ *  2. **入站连接**（本端点的**成员连接**）：全部以**优雅关闭**终止（tcp / unix / pipe 上为 FIN，不是 RST；
+ *     inproc 上为断开通知，见 §5.1b）；这些连接上的订阅失效，
  *     **接收队列**中未取走的消息直接丢弃（**不产生 `DROPPED` 记录**——它们在入站时已记过
  *     `RECEIVED`，且销毁端点不是「丢弃事件」）。正在执行的 `accept` 回调会先跑完，之后不再触发。
  *     仍在**握手期**（尚未交付、因而尚无 `accept` 回调）的入站会话一并以 FIN 关闭，不产生回调。
+ *     （**inproc 无握手期**，本句只适用于 tcp / unix / pipe。）
  *  3. **出站连接**（`ep_owner == ep` 的连接）：**转为独立队列后继续存活**。销毁时把它们的未发项
  *     迁入各自的连接队列（容量取 runtime 默认），之后照常发出；它们不再计入本端点扇出与
  *     `conn_count(ep)`。要一并关闭请先 `conn_destroy`。
@@ -697,10 +700,11 @@ int32_t iocomm_endpoint_local_addr(iocomm_runtime_t rt, iocomm_endpoint_t ep,
 |---|---|
 | `listen_addr` | 进程内唯一的任意 UTF-8 名字，≤ 255 B，**必填**。与端点名是**两套独立命名空间** |
 | 冲突 | 同进程内重名 → `ALREADY_EXISTS`；**跨进程天然隔离**（两个进程可用同一名字而互不相通） |
-| 投递 | 经接收方 loop 的跨线程任务队列；**绝不在 `send` 调用栈内同步回调** |
+| 投递 | inproc 是 `Transport` 实现：发送方 loop 从**发送方端点发送队列**取出后，**写入接收方的接收队列**（端点级或连接级，按 §6.1 归属；上限 `recv_queue_max`——端点队列受 `queue_limit` 覆盖，**per-connection 接收队列无独立覆盖项，固定取 Runtime 默认 / 全局 tune 值**，见 §5.0）。**接收队列满 → 写入返回 `WouldBlock`**，消息留在发送队列（与 tcp「内核写缓冲满 → `WouldBlock`」同义）。**写入成功后库必须唤醒接收方 loop**（与 `runtime_wakeup` 同一机制）——否则 manual 模式下接收方不知道有新数据，消息会滞留。回调只在接收方 loop 线程执行，**绝不在 `send` 调用栈内同步回调**；**不引入额外的库内队列** |
 | 与 tcp 一致 | 帧结构（消息边界、`sequence`、`original_len`）、**出站大小校验**（`TOO_LARGE`）、端点队列与溢出策略、监控打点 |
-| 有意不同 | ① 没有网络地址，`endpoint_local_addr` 返回名字；② **不参与发现**：`publish_local = 1` 时 `endpoint_create` 返回 `INVALID_ARGUMENT`（不做静默空操作） |
+| 有意不同 | ① 没有网络地址，`endpoint_local_addr` 返回名字；② **不参与发现**：`publish_local = 1` 时 `endpoint_create` 返回 `INVALID_ARGUMENT`（不做静默空操作）；③ **不跑心跳、不自动重连**（2026-11-11，D-5 / N-58）：不发 `HEARTBEAT` 帧，故 `lively` / `healthy` **恒 `TRUE`**（不读心跳，无从翻转）、`last_heartbeat_ns` **恒 0**、`reconnect_count` 恒 0；`stats.rtt_*` **不产生 inproc 样本**（仅当本 Runtime 只有 inproc 连接时为 0）、`stats.heartbeat_timeouts` / `stats.reconnects` 同理；`connected` / `config_current` 语义与其他传输**完全一致**。**对端卡死**看**发送方发送队列**（接收方不消费 → 接收队列满 → 写入 `WouldBlock` → 发送队列堆积 → 发送方按端点策略丢弃并计 `queue_dropped`；与 tcp「对端不读 → 内核写缓冲满」同一段代码）；**对端 Runtime 销毁 / 连接被关**走直接通知的 `connected = FALSE` + 断开事件（经 loop 任务投递；对端先断→本端收推送与事件，本端先销毁→不再对自己推事件、仅通知对端），连接对象**终结**——**对端先断**时先进入排空窗口、**接收队列取空后**才终结并失效；**本端销毁**时立即终结。此后对旧句柄的调用返回 `STALE_HANDLE`（FR-1.6 兜底），在途异步发送按 §5.2 取消表按触发源报码（本端销毁 → `CANCELLED`，对端断开 → `DISCONNECTED`）；**定序与排空窗口（2026-11-13）**：断开通知经 loop 任务到达，而数据在接收队列——二者**不在同一条 FIFO**。裁定如下：<br>**对端先断** → 连接进入「**已断开、待排空**」窗口：`conn_status` **立即**报 `connected = FALSE`，但**断开事件**推迟到**该连接在当前路由所在接收对象中的「可交付残留」为 0** 之后才推送。**「可交付残留」的唯一定义**：连接级持有（`conn_subscribe` / `conn_recv`）= 该连接自己接收队列中的项；**端点级持有 = 只算该连接在该端点队列中的项**（端点队列里其他存活连接的消息**不**拖延它）；**无论哪级，已从队列取出、但尚未完成交付的项仍计入残留**（订阅模式 = 回调尚未返回；拉取模式 = `conn_recv` 尚未把消息写入 `*out`）——`conn_recv` 与条件回调**跨线程**（前者应用线程、后者 loop 线程），若不把在途项计入，会出现「先推断开事件、后交付数据」的倒序。拉取模式下 `conn_recv` 在残留取空后报 `ICOMM_ERR_DISCONNECTED`；**端点级持有**时路由在端点队列、`conn_recv` 返回 `INVALID_STATE`，该连接的残留取空后断开事件即推送（`endpoint_recv` **不**报断开码——它是聚合视图，连接生死以条件事件为准）。窗口内**句柄仍有效**、**仍计入 `conn_count(ep)`**；事件推送**先于**从成员集合摘除。**谓词一律按「该连接当前路由所在的接收对象」判定**（连接级或端点级，见 §6.1 队列归属）。**窗口内 `endpoint_send` 扇出视窗口内连接为不存在**（暂不计入扇出集合）：若端点内无其他扇出成员 → 按「无成员连接」返回 `NO_RECEIVER` 并产生 `DROPPED(NO_SUBSCRIBER)`；否则只投向其余成员。**窗口无时限**：应用若永不取走残留，该连接与 `conn_count` 计数长期不回收（已知限制，由应用负责消费）。<br>**本端主动销毁**（`conn_destroy` / `conn_abort` / `*_close_graceful`）→ **不进入窗口**：按 [§5.2 子对象随父对象销毁](c-abi.md) 立即丢弃剩余消息、句柄立即失效、不向自己推 `connected = FALSE`。<br>事件推送前的 `connected = FALSE` 与**事件**的时序是两件事（条件值先变、事件后到），与 tcp「socket 已断但仍可读出缓冲数据」同理。见 [线格式 §7](wire-format.md)、需求 FR-3.11 / FR-3.12 |
 | 分配 | 编解码后的缓冲**可以移动代替拷贝**交给接收方（零拷贝的主要收益） |
+| 完成点 | inproc 的「传输层」就是接收方接收队列：**同步发送成功 / `on_done(OK)` 的完成点 = 消息已写入接收方接收队列**（与 tcp 的「已完整交给传输层」同义；`queue_timeout_ms` 的区间「入队 → 开始写」在 inproc 上是「入队 → 写入接收队列」，**语义不变**） |
 
 > **大小校验为什么不在 inproc 上放宽**：nng 在 inproc 上忽略 `NNG_OPT_RECVMAXSZ`（理由是同地址空间「implicitly trusted」）。
 > 本库**有意不同**——保留校验的理由不是安全，而是 ① 有界队列（FR-4.6）要求队列占用有上界，否则「有界」只在部分传输上成立；
@@ -766,7 +770,8 @@ int32_t iocomm_endpoint_local_addr(iocomm_runtime_t rt, iocomm_endpoint_t ep,
  *   （同地址空间直接读取，仅在对端 Runtime 已销毁的竞态下为 0）。详见 [线格式 §5 / §7](wire-format.md)。
  *
  * **inbound 是借用句柄，只在本次回调期间有效**（借用语义，见 ADR-002）：
- *   - 什么都不做              → **全部** accept 回调返回后若仍无任何持有动作，库自动收回并以 FIN 优雅关闭（= 拒绝）
+ *   - 什么都不做              → **全部** accept 回调返回后若仍无任何持有动作，库自动收回并以**优雅关闭**拒绝
+ *                               （tcp / unix / pipe 上为 FIN；inproc 上为断开通知，见 §5.1b）
  *                               （多次注册时「任一回调完成持有即保留」，见 AC-33；2026-11-05，N-37）
  *   - iocomm_conn_subscribe   → **隐式持有**（订阅即所有权），连接保持打开
  *   - iocomm_conn_retain      → 显式持有。**对未被端点级收消息持有的连接**：用于拉取模式
@@ -921,7 +926,7 @@ int32_t iocomm_conn_retain(iocomm_runtime_t rt, iocomm_conn_t conn,
  * | 销毁 | 受影响 | 不受影响 |
  * |---|---|---|
  * | Runtime | 全部（端点 / 连接 / 订阅 / 监控者 / 快照），逐条 `on_done(CANCELLED)` | — |
- * | endpoint | 挂在它上面的订阅 / 监控者 / **入站连接**（FIN）；名字锁释放 | 出站连接（`ep_owner == ep` 的仍存活，只是不再计入扇出） |
+ * | endpoint | 挂在它上面的订阅 / 监控者 / **入站连接**（优雅关闭：tcp / unix / pipe 为 FIN，inproc 为断开通知）；名字锁释放 | 出站连接（`ep_owner == ep` 的仍存活，只是不再计入扇出） |
  * | conn | 该连接上的订阅、接收队列剩余消息、在途异步发送 | 端点、其他连接 |
  * | subscription | 只是停止回调；**已入队的消息保留在端点/连接的接收队列里** | 端点、连接、消息 |
  * | monitor | 环与 arena 释放（v1.1）；之后的 `poll` 返回 `CLOSED` | 被监控的连接/端点 |
@@ -951,8 +956,8 @@ int32_t iocomm_conn_retain(iocomm_runtime_t rt, iocomm_conn_t conn,
  *
  * **在途异步发送一律取消**：每条未完成的 send_async 仍恰好触发一次
  * on_done(code = ICOMM_ERR_CANCELLED)（与 AC-27 的 Runtime 销毁路径一致）。
- * 发送缓冲中尚未交给传输层的数据直接丢弃；随后以 FIN 关闭。
- * **FIN 而不是 RST 的前提**：实现必须先 `shutdown(SHUT_WR)`，再**有界**读完接收缓冲
+ * 发送缓冲中尚未交给传输层的数据直接丢弃；随后以**优雅关闭**终止（tcp / unix / pipe 上为 FIN，见下方前提；inproc 上为断开通知，见 §5.1b）。
+ * **FIN 而不是 RST 的前提**（仅 tcp / unix / pipe）：实现必须先 `shutdown(SHUT_WR)`，再**有界**读完接收缓冲
  * （上限 64 KiB 或 100 ms，先到者）后 `close()`——否则内核因「接收缓冲有未读数据」发 RST，
  * 对端看到的就不是 FIN（AC-33 / AC-33b 会失败）。
  * 不阻塞；任意线程可调用（同一连接的创建/销毁由调用方串行化，架构 §3.3）。重复调用返回 STALE_HANDLE。
@@ -964,17 +969,35 @@ int32_t iocomm_conn_destroy(iocomm_runtime_t rt, iocomm_conn_t conn,
 
 /* 优雅关闭：先把发送队列里的数据 flush 给传输层，再以 FIN 关闭；
  * 最多等待 linger_ms。**在 loop 线程/回调内调用返回 WOULD_DEADLOCK**。
- * 返回时句柄失效；在途异步发送的 on_done 按实际结果或 CANCELLED 报告。 */
+ * 返回时句柄失效；在途异步发送的 on_done 按实际结果或 CANCELLED 报告。
+ * **inproc 上**：没有内核缓冲，「flush」= 由**发送方 loop** 把发送队列中属于该连接的项全部
+ * `write` 进接收方接收队列。**线程归属与 tcp 相同**——flush 由本 Runtime 自己的 loop 推进：
+ * owned 模式等 IO 线程收敛；manual 模式下**本函数在 loop 线程上返回 `WOULD_DEADLOCK`**（它是阻塞型 API），
+ * 故 manual 应用应在 loop 线程之外调用、并同时有其他线程继续驱动 `run_once`，直到本函数返回。
+ * `linger_ms` 在 inproc 上**不作为内核 flush 的等待量**，但仍作为**等待 loop 推进的上限**（因此 `TIMEOUT` 有来源）。
+ * **`TIMEOUT` 仍可能出现**：等待 loop 推进的时间超时（manual 模式另一方停止驱动时）。
+ * **返回值以 §3.2.1 矩阵为准**（`STALE_HANDLE` / `INVALID_STATE` / `WOULD_DEADLOCK` / `TIMEOUT` / `INTERNAL`，
+ * **无 `WOULD_BLOCK`**）；`WOULD_BLOCK` 是 `runtime_drain` 的码，不是本函数的。 */
 int32_t iocomm_conn_close_graceful(iocomm_runtime_t rt, iocomm_conn_t conn,
                                    uint64_t linger_ms, iocomm_error* err);
 
 /* 立即断开（RST）：取消在途发送、丢弃全部缓冲、不等 FIN 握手。
  * **异常中止专用**（例如协议层已无法恢复）；正常拒绝入站连接请用
- * conn_destroy（同是立即取消，但以 FIN 关闭），避免对端把 RST 误判为网络故障。 */
+ * conn_destroy（同是立即取消，但以**优雅关闭**终止——tcp / unix / pipe 为 FIN；inproc 为断开通知），避免对端把 RST 误判为网络故障。
+ * **inproc 上**：没有 RST 可区分——丢弃发送队列中属于该连接的项并断开。
+ * **对端**观测到的是普通断开：对端自身在途异步发送的 `on_done` 报 `DISCONNECTED`
+ * （这是**对端**的 on_done 通道；调用方自己的 on_done 按 §5.2 取消表报 `CANCELLED`，两者不要混淆）。 */
 int32_t iocomm_conn_abort(iocomm_runtime_t rt, iocomm_conn_t conn,
                           iocomm_error* err);
 
-/* 连接状态（条件集） */
+/* 连接状态（条件集）。
+ * **inproc 断开后（2026-11-11，D-5 / N-58）**：**对端先断**时进入「已断开、待排空」窗口
+ * （2026-11-13）——`connected` 立即为 `FALSE`，但本函数在**窗口内仍返回 `OK`**、句柄有效，
+ * 接收队列取空后才终结句柄；**本端主动销毁**则立即终结、本函数随即返回 `STALE_HANDLE`。
+ * 判空口径 = 「该连接在当前路由所在接收对象中的**可交付残留**为 0」（见 §5.1b；已取出但尚未完成交付的项仍计入）。
+ * 断开当下在途异步发送**按 §5.2 取消表按触发源报码**
+ * （本端销毁 → `CANCELLED`，对端断开 → `DISCONNECTED`）。应用已在断开事件中拿到结论；
+ * 重建须重新 `connect*` 拿新句柄。 */
 int32_t iocomm_conn_status(iocomm_runtime_t rt, iocomm_conn_t conn,
                            iocomm_peer_status* out, iocomm_error* err);
 
@@ -998,7 +1021,7 @@ int32_t  iocomm_conn_get  (iocomm_runtime_t rt, iocomm_endpoint_t ep,
 > 无 `iocomm_conn_t` 句柄、不占 `max_handles`、对应用不可见（见上方 `iocomm_accept_fn` 注释与 [线格式 §5](wire-format.md)）。
 > 这与借用语义自洽：回调返回即收回的是**已经完成握手、可以正常收发的连接**，不存在「借出一个还不能用的连接」的窗口。
 > `accept` 回调拿到的 `inbound` **只在回调期间有效**；**全部** `accept` 回调返回后若库仍没有观测到任何持有动作，
-> 连接被自动收回并以 FIN 优雅关闭（**任一**回调完成持有即保留——同一端点可注册多个 accept 回调，
+> 连接被自动收回并以**优雅关闭**拒绝（tcp / unix / pipe 上为 FIN；inproc 上为断开通知，见 §5.1b）（**任一**回调完成持有即保留——同一端点可注册多个 accept 回调，
 > 它们按注册顺序各触发一次，生命周期判定在全部跑完后进行；见 AC-33）。持有动作有**三种**：**显式 `conn_retain`**、**隐式
 > `conn_subscribe`**、以及**端点级持有**——该监听端点已注册 `iocomm_subscribe(ep)` 或
 > `endpoint_recv(ep)` 时，端点在**交付的同一时刻**接管它接入的入站连接（交付前是库的内部会话，见下方交付时点；机制见 §6.4）。
@@ -1007,11 +1030,12 @@ int32_t  iocomm_conn_get  (iocomm_runtime_t rt, iocomm_endpoint_t ep,
 > 若同时未持有，返回 `INVALID_STATE`，强制在回调内表态。
 > **仅保存句柄不算持有**（库无法观测外部变量），该连接会被回收并返回 `STALE_HANDLE`。
 > **无消费者端点（N-24）**：端点既未注册 `endpoint_accept`、也未启用 `iocomm_subscribe(ep)` /
-> `endpoint_recv(ep)` 时，入站连接在交付时点**立即以 FIN 关闭**，不产生 `accept` 回调、
+> `endpoint_recv(ep)` 时，入站连接在交付时点**立即关闭**（tcp / unix / pipe 上为 FIN；inproc 上为断开通知，见 §5.1b），不产生 `accept` 回调、
 > 不产生任何监控记录/计数，写 `log_fn` 的 **WARN**（含端点名）。
 >
 > **成员资格**：入站连接被持有后即成为该监听端点的**成员**，参与 `endpoint_send` 扇出与
-> `conn_count(ep)`；语义与 `ep_owner == ep` 的出站成员连接相同。（2026-11-03 修正 N-01：
+> `conn_count(ep)`；语义与 `ep_owner == ep` 的出站成员连接相同。**唯一例外是 inproc 排空窗口内的连接**：
+> 它仍计入 `conn_count(ep)`、仍受条件订阅覆盖，但**不参与扇出**（见 §5.1b 与需求 FR-5.2 / FR-8.6）。（2026-11-03 修正 N-01：
 > 此前「入站连接不归属端点、不参与扇出」的规定已废止——它使纯服务端无法广播。）
 
 > **manual 模式的建连路径**：`iocomm_connect_async` / `iocomm_connect_node_async`。同步版本在 loop 驱动线程上一律返回 `WOULD_DEADLOCK`。
@@ -1126,12 +1150,21 @@ int32_t iocomm_endpoint_set_overflow(iocomm_runtime_t rt, iocomm_endpoint_t ep,
 >
 > **接收侧**共用同一端点的策略；`BLOCK` 永不生效，`ERROR` 的语义固定为「丢弃 + 计数 + 产生
 > `DROPPED(reason = QUEUE_FULL)`」，**不关闭连接**（接收侧没有可返回失败的调用方）。
+> **限定（2026-11-13，D-5 / N-58）**：这句话默认「接收侧的数据由 socket 读事件产生」。**inproc 不同**——
+> 写入接收队列的是**发送方 loop**（`Transport::write` 直接写接收队列），它**有**一个可返回失败的位置：
+> 队列满时 `write` 返回 `WouldBlock`，**不写、不丢**，由**发送方**的发送队列按端点策略处理。
+> 故 inproc 上「接收侧丢弃」不可达；`BLOCK` 在 inproc 发送队列上的表现与 tcp **完全一致**——**同步发送真阻塞至
+> `timeout_ms`（超时 `ICOMM_ERR_TIMEOUT`）**、**异步发送退化为 `ERROR`（`on_done(WOULD_BLOCK)`）**，
+> 即「退化为 `ERROR`」这一步才产生 `WouldBlock`，`BLOCK` 本身在同步路径上不会以 `WouldBlock` 返回。
+> 接收队列满时**由发送方的发送队列承担溢出与计数**。
 >
 > **两个 reason 的分界（唯一口径）**：分界依据是**策略**，不是方向。
 > - 队列满 + `DROP_OLDEST`：旧项**曾被接受**、后被挤出 → `QUEUE_FULL`（发送侧、接收侧都适用）
 > - 队列满 + `DROP_NEWEST`：**新消息从未被接受** → **仍记 `QUEUE_FULL`**（理由：按**策略**分界而非方向，见 §6.1；实现者不要因「未被接受」改记为 `BACKPRESSURE`）
 > - 队列满 + `ERROR` → 消息**未被接受** → `BACKPRESSURE`；接收侧没有可返回失败的调用方，
 >   按 §6.1 固定为「丢弃 + 计数 + `DROPPED(QUEUE_FULL)`」，因此 `BACKPRESSURE` 实际只出现在发送侧。
+>   **inproc 限定（2026-11-13）**：inproc 的接收队列由发送方 `write` 写入，满时 `WouldBlock` 回到发送侧，
+>   故「接收侧丢弃」不可达、`BACKPRESSURE` 仍只出在发送侧——**结论不变，但理由不同**（见本节开头的 inproc 限定）。
 >
 > **失败源的优先顺序**见上方「入队前失败」表：连接已断优先于队列满。
 
@@ -1165,6 +1198,14 @@ typedef struct iocomm_send_options {
  * 与 conn_retain 冲突时**关闭优先**：数据 flush 后连接即关闭，持有者随后拿到 STALE_HANDLE。
  * 关闭发生在 on_done 之后——on_done 报告的是「数据已交给传输层」，不等待对端确认。 */
 #define ICOMM_SEND_CLOSE_AFTER 0x01u
+/* **inproc 上的等价物（2026-11-13）**：inproc 没有 FIN / RST，关闭由库直接通知对端——
+ *   关闭动作 = **数据全部 `write` 进接收方接收队列之后**发断开通知，语义与 tcp 的「flush 后 FIN」
+ *   相同（链路层顺序：先数据、后断开）。
+ * **`conn_close_graceful(linger_ms)` 在 inproc 上**：flush 边界 = 发送队列中属于该连接的项；
+ *   `linger_ms` 的「等内核 flush」含义只对 tcp / unix / pipe 适用；inproc 上不等待内核，
+ *   **仍作为等待 loop 推进的上限**（`TIMEOUT` 的来源，见 `iocomm_conn_close_graceful` 注释）。
+ * **`conn_abort` 在 inproc 上**：立即丢弃发送队列中该连接的项并断开，对端观测面与「对端断开」相同
+ *   （`DISCONNECTED`）——inproc 没有 RST 可区分。 */
 /* CLOSE_AFTER 与失败路径的裁决：
  *   - 消息**成功交给传输层** → on_done(OK) **之后**发 FIN；
  *   - 消息**入队前失败**（TOO_LARGE）→ 同同步返回报告，**连接保持打开**（没有数据要「发完」）；
@@ -1262,6 +1303,7 @@ int32_t iocomm_endpoint_send(iocomm_runtime_t rt, iocomm_endpoint_t ep,
   为保持唯一口径统一以「开始写」为界。超时只用于「排队等不到写机会」，不用于「写得太慢」。
 - **两个 `timeout_ms` 不同名**：同步参数 `timeout_ms = 0` 是「只尝试一次」，异步字段 0 是「无截止」。所以字段叫 `queue_timeout_ms`，不叫 `timeout_ms`。
 - `on_done(OK)` 的完成点与同步成功返回**相同**——都是「已交给传输层」，不是「对端已收到」。
+  **inproc 的「交给传输层」= 已写入接收方接收队列**（§5.1b「完成点」），与 tcp 的「OS 已接受」对位。
 
 ### 6.3 接收
 
@@ -1332,7 +1374,11 @@ int32_t iocomm_endpoint_recv(iocomm_runtime_t rt, iocomm_endpoint_t ep,
                              iocomm_error* err);
 /* `conn_recv` 的**前置条件**：该连接尚未启用 `conn_subscribe`、且**未由端点级收消息持有**
  * （否则返回 `INVALID_STATE`，见上方与 §6.4）。它**等待至多 `timeout_ms`**，超时返回 `TIMEOUT`；
- * 在 loop 线程调用返回 `WOULD_DEADLOCK`。 */
+ * 在 loop 线程调用返回 `WOULD_DEADLOCK`。
+ * **inproc 排空窗口（2026-11-13）**：对端先断后，句柄在窗口内仍有效——本函数**先返回队列中全部残留消息**，
+ * 取空后才返回 `ICOMM_ERR_DISCONNECTED`（**不是** `STALE_HANDLE`）；窗口结束、句柄终结后才变 `STALE_HANDLE`。
+ * **空队列的裁决**：窗口内队列为空时**立即返回 `ICOMM_ERR_DISCONNECTED`**（不等 `timeout_ms`）——连接已确定
+ * 不会再有新消息，等待没有意义。该码**粘滞**：窗口内与终结前重复调用一致返回它，不会变回 `TIMEOUT`。 */
 int32_t iocomm_conn_recv(iocomm_runtime_t rt, iocomm_conn_t conn,
                          iocomm_message* out, uint64_t timeout_ms,
                          iocomm_error* err);
@@ -1573,10 +1619,16 @@ struct iocomm_peer_status {
     uint64_t peer_node_id;
     /* 条件集（FR-5.1）：值为 iocomm_condition_status。
      * 自动重连期间（N-06）：句柄不变，`connected` = FALSE（确知未连通）→ 重连成功后 TRUE；
-     * `lively` / `healthy` 在重连后的心跳窗口未满前为 UNKNOWN。AC-105 观测该序列。 */
+     * `lively` / `healthy` 在重连后的心跳窗口未满前为 UNKNOWN。AC-105 观测该序列。
+     * **inproc 例外（2026-11-11，D-5 / N-58）**：inproc 不发心跳（线格式 §7），故 `lively` / `healthy`
+     *   **恒为 TRUE**、不存在 UNKNOWN（**这不表示「健康探测通过」或「无协议错误」**——该列对 inproc 无判定语义；
+     *   inproc 无握手、无线格式帧，故也不存在 `ERROR` 帧）；
+     *   对端 loop 卡死改看**发送方发送队列**（接收方不消费 → 接收队列满 → 写入 `WouldBlock` →
+     *   发送队列堆积 → 按端点策略丢弃并计发送方 `queue_dropped`），对端 Runtime 销毁走 `connected = FALSE` + 断开事件、
+     *   不经重连；对端先断时进入排空窗口、**队列取空后**句柄才失效（本端销毁则立即失效）。见需求 FR-3.11 / FR-3.12。 */
     uint8_t connected;
     uint8_t lively;
-    uint8_t healthy;             /* 最近一个判定窗口内无重连 / 无协议错误；见架构 §5.2b */
+    uint8_t healthy;             /* 最近一个判定窗口内无重连 / 无协议错误；见架构 §5.2b。**inproc 恒 TRUE** */
     uint8_t config_current;
     uint32_t reserved1;
 
@@ -1589,30 +1641,41 @@ struct iocomm_peer_status {
      * 从未收到过（或从未收到过心跳）时为 **0**——这是「未发生」的唯一判据。
      * **0 不会被合法时间值撞上**：Linux `CLOCK_BOOTTIME` 自 boot 起即非 0；Windows `QueryPerformanceCounter`
      *   按 MS Learn 在 Windows XP 及之后不返回 0。故 0 作哨兵是安全的。
-     * 需要人读口径请看 `iocomm_diagnostic_dump` 的 `last_rx_age_ms` / `last_heartbeat_age_ms`（库已算好差值）。 */
+     * 需要人读口径请看 `iocomm_diagnostic_dump` 的 `last_rx_age_ms` / `last_heartbeat_age_ms`（库已算好差值）。
+     * **inproc 上 `last_heartbeat_ns` 恒为 0**（2026-11-11，D-5 / N-58：inproc 不发心跳，见线格式 §7）；
+     *   `last_rx_ns` 照常更新（它记的是**收到消息**的时刻，与心跳无关）。dump 里 `last_heartbeat_age_ms` 因此被省略。 */
     uint64_t last_rx_ns;
     uint64_t last_heartbeat_ns;
-    uint64_t reconnect_count;
+    uint64_t reconnect_count;    /* **inproc 恒为 0**（不适用自动重连，见 FR-3.12 / AC-124） */
 };
 
 #define ICOMM_PEER_STATUS_INIT { sizeof(iocomm_peer_status), 0 }
 
 /* FR-5.2：状态变化可订阅（适用于 conn 或 endpoint）。
  *
- * **连接级**（`iocomm_conn_condition_subscribe`）：只报该连接自身的条件集变化。
+ * **连接级**（`iocomm_conn_condition_subscribe`）：只报该连接自身的
+ * 条件集变化。**本端主动销毁例外**（与端点级同一口径）：`conn_destroy` / `conn_abort` / `*_close_graceful`
+ * 时**不向自己推送最后那次 `connected = FALSE`**——调用方正是发起方；对端侧照常收到。
  *
  * **端点级**（`iocomm_endpoint_condition_subscribe`，2026-11-05 定，N-45 / AC-121）：
- * = 对「**当前与未来全部成员连接**」条件集变化的聚合，语义等价于对每个成员连接各订阅一次，
- * 但**只产生一个订阅句柄**（`unsubscribe` 一次即覆盖全部）。
+ * = 对「**当前与未来全部计数成员连接**」条件集变化的聚合（**计数成员** = 计入 `conn_count(ep)` 的连接；
+ * 它与「扇出集合」的唯一差别是 **inproc 排空窗口内的连接**——仍受本订阅覆盖，但不参与扇出，见下方「成员定义」），
+ * 语义等价于对每个计数成员连接各订阅一次，但**只产生一个订阅句柄**（`unsubscribe` 一次即覆盖全部）。
  *   - **新成员自动纳入**：交付时点之后接入的成员连接自动进入订阅范围，
  *     **不需要**在 `endpoint_accept` 回调里补订阅；
  *   - **成员离开**（2026-11-05 补全，N-45）：该连接的**状态变化本身照常推送**——包括最后一次
  *     `connected = FALSE`（与逐连接订阅完全等价），**推送先于**它从成员集合中摘除；
  *     摘除之后不再为它投递。**不额外推送**「成员离开」这种**独立事件**——上线由 `endpoint_accept` 观测、
  *     节点上下线由 `discovery` 的 JOINED/LEFT 观测，这里再推一遍会形成第三套重复通道。
+ *     **本端主动销毁例外（通用语义，不只 inproc）**：「最后一次 `connected = FALSE`」指**对端先断**
+ *     的情形。**本端主动销毁**（`conn_destroy` / `conn_abort` / `*_close_graceful`）时不再对自己推送
+ *     ——调用方正是发起方，已知道结果，属「调用方主动取消」而非「成员离开」；对端侧照常收到推送。
+ *     这也与 §5.2 取消表「本端销毁 → `CANCELLED`」同口径。
  *     **注意「上线」的观测渠道按成员类型分**：**入站**成员上线由 `endpoint_accept` 观测；
  *     **`ep_owner == ep` 的出站成员**不经过 accept，其上线由 `iocomm_connect*` 的返回 / `on_done(OK)` 观测；
- *   - **成员定义** = 与 FR-8.6 的扇出集合**完全一致**：该端点的全部入站成员连接 + `ep_owner == ep` 的出站连接；
+ *   - **成员定义**：本订阅覆盖的是**计数成员** = 该端点的全部入站成员连接 + `ep_owner == ep` 的出站连接，
+ *     **外加 inproc 排空窗口内的连接**（它已断开但句柄未终结，仍计入 `conn_count(ep)`）。
+ *     「计数成员」与「扇出集合（FR-8.6）」的**唯一差别**就是后者**不含**窗口内连接（见 §5.1b）；
  *   - **端点没有自身状态**：回调的 `conn` 与 `ep` **恒非 0**，永不以 `conn == 0` 触发；
  *   - 与消息接收通道**无关**：不受 §6.4 的 `subscribe` / `recv` 二选一约束（矩阵见 §3.2.1）。
  *
@@ -1643,8 +1706,10 @@ struct iocomm_stats {
     uint64_t queue_dropped;        /* 该 Runtime 内「入队失败 / 被策略丢弃 / 入站帧被判超限或畸形」的累计条数；
                                     * 运行期事件都计；调用方编程错误（发送侧 `TOO_LARGE`、句柄无效）不计（见 §6.1） */
     uint64_t retransmits;          /* TCP 层重传（可读时）；否则 0 */
-    uint64_t heartbeat_timeouts;
-    uint64_t reconnects;
+    uint64_t heartbeat_timeouts;   /* **inproc 连接不产生超时**（无心跳，2026-11-11，D-5 / N-58）；
+                                    * 仅当本 Runtime 只有 inproc 连接时恒 0，混合传输时只累计 tcp / unix / pipe 的超时 */
+    uint64_t reconnects;           /* **inproc 连接不产生重连**（2026-11-11，D-5 / N-58：不适用 FR-4.4）；
+                                    * 仅当本 Runtime 只有 inproc 连接时恒 0 */
     uint64_t discovery_oversize;   /* 因单条超 1400 B 而未发送的发现条目数（FR-2.9） */
     uint64_t protocol_errors;      /* 收到 ERROR 帧或判定帧损坏的次数（v1） */
     uint64_t audit_events;         /* 已送交 audit_fn（v1：已写 log_fn 的 AUDIT 类别）的事件数 */
@@ -1652,7 +1717,8 @@ struct iocomm_stats {
     int64_t  send_queue_depth, recv_queue_depth;
     int64_t  open_endpoints, discovered_peers;
 
-    /* 延迟（FR-5.4）：基于心跳 RTT 的直方图分位 */
+    /* 延迟（FR-5.4）：基于心跳 RTT 的直方图分位。
+     * **inproc 连接不产生样本**（2026-11-11，D-5 / N-58：无心跳即无 RTT）；只有 inproc 连接时三项为 0。 */
     uint64_t rtt_p50_ns, rtt_p99_ns, rtt_max_ns;
 };
 
@@ -1689,6 +1755,7 @@ int32_t iocomm_stats_snapshot(iocomm_runtime_t rt, iocomm_stats* out,
  * - `ep`：连接所属端点；`ep_owner == 0` 的**无主出站连接**为 `0`。
  * - `lively` / `healthy`：`<bool>` 或 `null`；**`null` = `ICOMM_COND_UNKNOWN`**（如自动重连后的心跳窗口未满，
  *   见 `iocomm_peer_status` 注释）。`connected` 不用 `null`——它只在有句柄时才可观测，`false` 即确知未连通。
+ *   **inproc 连接上二者恒为 `true`**（2026-11-11，D-5 / N-58；不是 `null`——见 `iocomm_peer_status` 注释）。
  * - `last_rx_ns` / `last_heartbeat_ns`：**原样转发** `iocomm_peer_status` 的同名字段——**系统单调时钟原值**
  *   （Linux `CLOCK_BOOTTIME` / Windows QPC，**计挂起**，原点 = 系统 boot），**同机跨进程可比**，
  *   不跨机、跨重启不可比。保留原始值是为了让调用方能拿同一平台 API 自己做阈值判断。
@@ -1766,7 +1833,8 @@ typedef enum iocomm_drop_reason {
     ICOMM_DROP_NO_SUBSCRIBER = 2,  /* 端点扇出时无已建立连接 */
     ICOMM_DROP_TIMEOUT       = 3,  /* 异步发送排队超过 send_options.queue_timeout_ms */
     ICOMM_DROP_PEER_GONE     = 4,  /* 连接已断开时仍有待发消息 */
-    ICOMM_DROP_BACKPRESSURE  = 5,  /* 队列满且策略为 ERROR → **入队前被拒绝**（发送侧；接收侧无返回方，见 §6.1） */
+    ICOMM_DROP_BACKPRESSURE  = 5,  /* 队列满且策略为 ERROR → **入队前被拒绝**（发送侧；接收侧无返回方，见 §6.1。
+                                    * **inproc 上接收队列由发送方 write 填充、满即 WouldBlock，故接收侧同样无此记录**） */
     ICOMM_DROP_TOO_LARGE     = 6,  /* 帧超过 max_message_size（入站关闭连接） */
 } iocomm_drop_reason;
 ```

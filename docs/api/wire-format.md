@@ -236,12 +236,16 @@ payload 固定 6 B：`reason(u16)` + `reserved(u16)` + `detail(u32)`。
 **inproc 不走本文件定义的线格式**（同一地址空间，直接移交编解码后的缓冲）。
 
 - 它**不跑 `HELLO` 握手**：没有版本协商的必要——两端必然链接同一个库。
-- 「复用帧层」在架构文档里指的是**复用同一套消息抽象**（消息边界、`sequence`、`correlation_id`、`original_len`、监控打点），
+- **但投递不是无界的**：inproc 是一个 `Transport` 实现，它的写入目标是**接收方的接收队列**（`recv_queue_max` 有界）；队列满即 `write` 返回 `WouldBlock`、消息留在发送队列（[c-abi §5.1b](c-abi.md)）。这是 FR-4.6 的有界性在 inproc 上的落点，也是对端卡死的信号来源。
+- 它**也不跑心跳**（2026-11-11，D-5 / N-58）：`HEARTBEAT` / `HEARTBEAT_ACK`（§2 / §4）是**帧**，与 `HELLO` 同属本文件定义、inproc 不走的那一层；inproc 的 `peer_status.last_heartbeat_ns` **恒为 0**（「从未发生」），心跳 RTT 分位**无样本**。注意理由**不是**「离得近不需要检测」——
+  心跳解决两件事：**半开**（断了没人告诉你）与**对端卡死**（连着但对端不跑）。inproc 免掉前者（同地址空间断开是直接可观测的事实），**免不掉后者**；后者的信号在 inproc 上落在**发送方发送队列**：接收方不消费 → 接收队列满 → `write` 返回 `WouldBlock` → 发送队列堆积 → 按端点策略丢弃并计**发送方** `queue_dropped`（[c-abi §6.1](c-abi.md)）。与 tcp 共用同一段「写不动回 `WouldBlock`」的代码。
+  完整口径与**盲区**（缓冲未满前无信号，与 tcp 相同）见 [需求 FR-3.11](../requirements.md) 与 [架构 §5.2b / §6.2](../architecture.md)。
+- **复用帧层**在架构文档里指的是**复用同一套消息抽象**（消息边界、`sequence`、`correlation_id`、`original_len`、监控打点），
   **不是**逐字节走 `IOCM` 帧。
 - 因此 inproc 的跨版本兼容性问题不存在；`wire_version` 只在 tcp / unix / pipe 上协商。
 - **尺寸校验仍生效**：inproc 两端直接比较各自的 `max_message_size`（不协商），
   若本端大于对端，超出对端上限的消息在**本端发送时**已通过校验、在**对端入站时**被判 `TOO_LARGE` 并关闭连接。
-  这是 inproc 与 TCP 的唯一行为差异（TCP 有 §5 的协商可避免），属已知瑕疵，v1 不做额外协商。
+  这是 inproc 与 TCP 在**数据面校验**上的行为差异（TCP 有 §5 的协商可避免），属已知瑕疵，v1 不做额外协商。
 - **accept 交付时点 = 连接建立即交付**（显式定义，不是 §5 规则 7 的特例漏洞）：inproc 没有握手，
   「建立即可用」——没有可发 DATA 之前的窗口。因此 `iocomm_endpoint_accept` 回调在连接建立后触发，
   回调内 `conn_send_async(CLOSE_AFTER)` 合法。

@@ -178,7 +178,7 @@ mio::Poll
 ```
 
 - **不绑 tokio**：tokio 会拥有线程与调度器，与本库「调用方驱动」的要求冲突。
-- 跨线程投递用**无锁队列 + 唤醒 fd**（Windows 用 `IOCP` 的 post 机制或 event）。
+- 跨线程投递用**无锁队列 + 唤醒 fd**（Windows 用 `IOCP` 的 post 机制或 event）。该队列**只承载控制任务**（唤醒、注册、重配置），**不承载数据消息**——数据消息的跨线程路径走 `Transport`：tcp / unix / pipe 写内核缓冲，**inproc 写接收方的接收队列**（`recv_queue_max` 有界，见 [C ABI §5.1b](api/c-abi.md)）。控制任务队列的容量不属契约，由实现选择。
 - **计时器**：最小堆 + 单调时钟。所有超时经 `Clock` trait，测试可注入。
   **`Clock` 的生产实现不得是 `Instant::now()` 的薄包装**——Linux 上 `Instant` 落 `CLOCK_MONOTONIC`（不计挂起）、
   Windows 上落 `QueryPerformanceCounter`（计挂起），语义相反。生产实现须在 Linux 绑
@@ -275,11 +275,11 @@ NodeId = u64
 | **conn** | 一条双向连接 | **点对点** | 该连接 |
 | **subscription** | 推送回调的注册 | — | — |
 
-**入站连接**由 `iocomm_endpoint_accept()` 注册的回调交付（**双向 HELLO 完成后才触发**，见 §5.2b）。同一端点可注册**多个** accept 回调，按注册顺序各触发一次；持有动作只需在**任一**回调内完成，生命周期判定在**全部**回调跑完后进行（2026-11-05，N-37；见 C ABI §6.4 与 AC-33）。回调内的句柄是**借用**：只在回调期间有效。持有动作有**三种**——**显式 `conn_retain`**（拉取）、**隐式 `conn_subscribe`**（推送，订阅即所有权），以及**端点级持有**（该端点已启用 `iocomm_subscribe(ep)` / `endpoint_recv(ep)` 时，入站连接在**交付的同一时刻**由端点接管，回调内无需再表态）；三者都不做则回调返回时自动收回并以 FIN 优雅关闭。「发完即关」用发送选项 `ICOMM_SEND_CLOSE_AFTER`，`conn_send_async` 本身不是所有权开关。完整契约见 C ABI §5.2 与 [ADR-002](adr/ADR-002-message-addressing-and-ownership.md)。
+**入站连接**由 `iocomm_endpoint_accept()` 注册的回调交付（tcp / unix / pipe 上为**双向 HELLO 完成后才触发**，见 §5.2b；**inproc 上为连接建立即交付**，见 FR-3.5 / 线格式 §7）。同一端点可注册**多个** accept 回调，按注册顺序各触发一次；持有动作只需在**任一**回调内完成，生命周期判定在**全部**回调跑完后进行（2026-11-05，N-37；见 C ABI §6.4 与 AC-33）。回调内的句柄是**借用**：只在回调期间有效。持有动作有**三种**——**显式 `conn_retain`**（拉取）、**隐式 `conn_subscribe`**（推送，订阅即所有权），以及**端点级持有**（该端点已启用 `iocomm_subscribe(ep)` / `endpoint_recv(ep)` 时，入站连接在**交付的同一时刻**由端点接管，回调内无需再表态）；三者都不做则回调返回时自动收回并以**优雅关闭**拒绝（tcp / unix / pipe 上为 FIN；inproc 上为断开通知，见 C ABI §5.1b）。「发完即关」用发送选项 `ICOMM_SEND_CLOSE_AFTER`，`conn_send_async` 本身不是所有权开关。完整契约见 C ABI §5.2 与 [ADR-002](adr/ADR-002-message-addressing-and-ownership.md)。
 
-> **成员资格（2026-11-03，N-01 / N-03）**：入站连接**在交付（双向 HELLO 完成）时**被持有即成为监听端点的**成员**，参与 `endpoint_send` 扇出与 `conn_count(ep)`，与 `ep_owner == ep` 的出站成员连接地位相同。**握手期的内部会话不在此列**（无句柄、不计入扇出与计数）。**纯服务端（只 accept 不 connect）因此可以对全部入站连接做一次扇出广播。** 此前「入站连接不归属端点、不参与扇出」的规定已废止——它使服务端广播不可用，且与本节 `endpoint` 行自相矛盾。
+> **成员资格（2026-11-03，N-01 / N-03；2026-11-13 补 carve-out）**：入站连接**在交付时**被持有即成为监听端点的**成员**，参与 `endpoint_send` 扇出与 `conn_count(ep)`，与 `ep_owner == ep` 的出站成员连接地位相同。**唯一例外是 inproc 排空窗口内的连接**：它已断开但句柄未终结，**仍计入 `conn_count(ep)`、仍受条件订阅覆盖，但不再参与扇出**（`endpoint_send` 视其不存在，见 FR-5.2 carve-out 与 [C ABI §5.1b](api/c-abi.md)）。**握手期的内部会话不在此列**（无句柄、不计入扇出与计数）。**纯服务端（只 accept 不 connect）因此可以对全部入站连接做一次扇出广播。** 此前「入站连接不归属端点、不参与扇出」的规定已废止——它使服务端广播不可用，且与本节 `endpoint` 行自相矛盾。
 
-> **连接句柄由 `connect*()`（出站成功）或 `accept`（入站交付）创建**；**句柄产生后**的状态迁移在 `iocomm_conn_t` 上发生。入站在交付前先经历内部 `Handshaking` 会话（无句柄，见 §5.2b）。关闭有四条路：`conn_destroy`（取消在途、丢弃缓冲、FIN）、`conn_close_graceful(linger_ms)`（flush 后关）、`ICOMM_SEND_CLOSE_AFTER`（发完即关）、`conn_abort`（RST 异常中止）。
+> **连接句柄由 `connect*()`（出站成功）或 `accept`（入站交付）创建**；**句柄产生后**的状态迁移在 `iocomm_conn_t` 上发生。入站在交付前先经历内部 `Handshaking` 会话（无句柄，见 §5.2b）。关闭有四条路：`conn_destroy`（取消在途、丢弃缓冲、优雅关闭）、`conn_close_graceful(linger_ms)`（flush 后关）、`ICOMM_SEND_CLOSE_AFTER`（发完即关）、`conn_abort`（异常中止）。**传输差异**：tcp / unix / pipe 上优雅关闭 = FIN、异常中止 = RST；**inproc 既无 FIN 也无 RST**——优雅关闭 = 断开通知，异常中止的观测面与「对端断开」相同（见 C ABI §5.1b）。
 
 ### 5.2b 连接状态机
 
@@ -327,11 +327,16 @@ NodeId = u64
 | `Healthy` | True / False / Unknown —— **定义**：最近一次心跳判定周期（`heartbeat_ms × max(heartbeat_miss_limit, 1)`，**默认 `2000 ms × 3 = 6 s`**）内既**没有重连**、也**没有收到 `ERROR` 帧**；`Unknown` = 该连接尚未经历满一个周期 |
 | `ConfigCurrent` | True / False |
 
+> **`Lively` / `Healthy` 只对 tcp / unix / pipe 有判定语义**（2026-11-11，D-5 / N-58）。**为什么不包括 inproc**：心跳要解决两件事——「半开」（断了没人告诉你）与「对端卡死」（连着但对端不跑）。inproc 同地址空间里断开是直接可观测的事实，免掉前者；**免不掉后者**，但那一半**不靠心跳**去猜（见下条）。这三条传输保留心跳的理由不是「本机 IPC 没有半开」，而是它们**走线格式、零增量成本**——心跳帧与序号/双向确认机制本就存在。**inproc 上 `lively` / `healthy` 恒为 `TRUE`**，不存在 `Unknown`——没有心跳就没有「窗口未满」这回事。
+> **inproc 的异常观测面是另两条**（[FR-3.11 / FR-3.12](requirements.md)）：① **对端 loop 卡死** → 本端持续发送、接收方不消费 → **接收队列满** → 发送方 `Transport::write` 返回 `WouldBlock` → 消息堆积在**发送方发送队列** → 按端点策略丢弃并计入**发送方** `queue_dropped`。**与 tcp 是同一段代码**：tcp 写内核缓冲满 → `WouldBlock` → 发送队列堆积；inproc 只是把「内核缓冲」换成了接收队列（`Lively` 表达不了这个，别去读它）。
+> ② **对端 Runtime 销毁 / 连接被关** → 同地址空间**直接通知** → `Connected = False` + 断开事件（**经 loop 任务投递**；对端先断 → 本端收推送与事件；本端先销毁 → 不再对自己推事件、仅通知对端；两端同时销毁各自回收）；**不经 `Reconnecting`**（inproc 不适用 §5.2c）；连接对象**终结**——对端先断时先入排空窗口、队列取空后才终结并失效；本端销毁立即失效（此后调用 `STALE_HANDLE`）。重建须重新 `connect*` 拿新句柄。**定序**：断开通知走控制任务队列、数据走接收队列，**二者不是同一条通道**——故规定**断开事件延后到该连接「可交付残留」为 0 之后才推送**。**「可交付残留」按该连接当前路由所在的接收对象计**：连接级持有算它自己队列中的项；**端点级持有只算该连接在该端点队列中的项**（端点队列里其他存活连接的消息**不**拖延它）；**已取出但尚未完成交付的项仍计入**（订阅模式 = 回调未返回；拉取模式 = `conn_recv` 未写入 `*out`，两者跨线程）。推送模式先把这些残留回调完；拉取模式下**按该连接当前的路由取完**——连接级持有用 `conn_recv`，端点级持有用 `endpoint_recv`（此时 `conn_recv` 返回 `INVALID_STATE`，不能用来排空）。**本端主动销毁不排空**，按销毁语义立即丢弃剩余消息。`conn_status` 可先报 `connected = FALSE`。
+> **盲区与 tcp 相同**：发送缓冲**尚未满**时无信号——这是所有传输共有的「缓冲未满前不可见窗口」，不是 inproc 特有缺陷；v1 不做 per-connection 卡死定时器（[需求 §4 非目标](requirements.md)）。
+
 上层按需查询，新增条件不破坏既有判断。**状态变化通过 `iocomm_condition_fn` 回调推送**（见 C ABI §8），同时保留拉取式查询。
 
 ### 5.2c 自动重连语义（2026-11-04 定，N-06）
 
-自动重连（FR-4.4）只适用于**出站连接**（`connect*` 产出）；入站连接断开后由对端重连，本端不主动重拨。
+自动重连（FR-4.4）只适用于**出站连接**（`connect*` 产出）；入站连接断开后由对端重连，本端不主动重拨。**且在传输上仅限 tcp / unix / pipe**（2026-11-11，D-5 / N-58）——**inproc 不适用本条整体**：断开由同地址空间的直接通知驱动，不进入 `Reconnecting`；对端先断时连接先入排空窗口、队列取空后才终结失效（本端销毁立即失效）；且对端 Runtime 销毁后同一 `listen_addr` 已无监听者，自动重拨只会对空转。应用重建要重新 `connect*` 拿新句柄（[FR-3.12](requirements.md)、验收 AC-124）。
 重连过程中确定四件事（对应的验收见 [需求 AC-105](requirements.md)）：
 
 1. **句柄复用**：重连成功前后是**同一个 `iocomm_conn_t`**。`Connecting / Handshaking / Reconnecting` 期间句柄
@@ -400,12 +405,24 @@ Message {
 
 ### 6.2 心跳与存活
 
+> **先分清四个别名的「心跳」**（2026-11-11，D-5 澄清；四个概念默认值撞在一起，读错一个就会算错窗口）：
+
+| # | 是什么 | 配置字段 | 默认 | 管什么 |
+|---|---|---|---|---|
+| ① | **内核 TCP keepalive**（`SO_KEEPALIVE` / `TCP_KEEPIDLE` / `SIO_KEEPALIVE_VALS`） | **不暴露**（非目标，N-12） | 2 小时（OS 默认） | **本库不用**——由 ② 顶替 |
+| ② | **应用层连接心跳**（线格式 `HEARTBEAT` / `HEARTBEAT_ACK`，§2 / §4） | `tune_config.heartbeat_ms` + `heartbeat_miss_limit` | **2000 × 3 = 6 s** | `Lively` / 链路是否还活着 |
+| ③ | **发现信标**（UDP `BEACON`） | `discovery_config.heartbeat_ms` / `lease_ms` | 2000 / 6000 ms | 网段里**有没有谁**，与连接无关 |
+| ④ | `tune_config.discovery_heartbeat_ms` | 运行期覆盖 ③ | — | 同上 |
+
+> **① 与 ② 是替代关系，不是叠加**：内核 keepalive 的活全压在 ② 上（理由见下条）。**② 与 ③ 名字撞了但不是一件事**——② 测连接、③ 测节点；`discovery_config` 里那个裸名 `heartbeat_ms` 是历史遗留，`tune_config` 用 `discovery_heartbeat_ms` 区分。
+
 - 应用层心跳（**不依赖内核 keepalive**，其默认 2 小时且 Windows Server 2016 缺 `TCP_KEEPIDLE`）。v1 **不暴露**内核 keepalive 开关（见 [c-abi §5.1](api/c-abi.md) 非目标口径）。
 - 心跳带**序号 + 时间戳 + 双向确认**（消除单向故障盲区）。
 - **默认值（唯一权威）**：`heartbeat_ms = 2000`、`heartbeat_miss_limit = 3`。两个字段都可配
   （`tune_config` 热更新），但**默认即 3**，不是「≥ 3」的下界。
 - 判定：连续 `heartbeat_miss_limit` 次未收到对端心跳 → `Lively = False`；默认 3 次（= 6 s）。
 - 重连：**Full jitter 退避**（`random(0, min(cap, base*2^n))`），cap 10–30s。
+- **② 只适用于 tcp / unix / pipe**（2026-11-11，D-5 / N-58）：**inproc 不发心跳**——它是线格式帧，inproc 不走线格式（[线格式 §7](api/wire-format.md)）。inproc 的判据不是「离得近」，而是「**对端异常能不能被直接告知**」：能（→ 断开走直接通知），但对端**卡死**时不能——那一半改由**发送方发送队列**承载（接收方不消费 → 接收队列满 → `write` 返回 `WouldBlock` → 发送队列堆积 → 按端点策略处理并计 `queue_dropped`），**与 tcp 共用同一段「写不动回 `WouldBlock`」的代码**。缓冲未满前**无信号**，与 tcp 相同（见 §5.2b 注与 [FR-3.11](requirements.md)）。
 
 ### 6.3 发现
 
@@ -649,13 +666,15 @@ enum ErrorCode {
 | # | 里程碑 | 产出 | 验收 |
 |---|---|---|---|
 | **M0** | 骨架 | C ABI 头（C99 可编译）+ crate 划分 + CI 三平台构建 | AC-P1 / AC-P5 / AC-18 / AC-24 / AC-35 / AC-95 |
-| **M1** | inproc 闭环 | 句柄表（代际）+ Runtime + 端点/连接模型 + **跨进程名字表（§6.4）** + **端点名格式/长度校验（§c-abi 5.1a）** + **手动驱动语义（`run_once` / `run_for`）** + `inproc` 传输（FR-3.5–3.10） | AC-4 / AC-11 / AC-25 / AC-32 / AC-33 / AC-36 / AC-40 / AC-80 / AC-81 / AC-82 / AC-83 / AC-84 / AC-89 / AC-100 / AC-102 / **AC-108** / **AC-109** / **AC-111** / **AC-114** / **AC-115** / **AC-116** / **AC-120** |
-| **M2** | TCP + 双向 | tcp 传输 + accept + connect + send/recv/subscribe + 异步排队超时 + **[线格式](api/wire-format.md)（HELLO 握手 · ERROR 帧 · 尺寸协商）** + **端点级套接字参数（`TCP_NODELAY` / backlog）** | AC-1 / AC-2 / AC-10 / AC-29 / AC-30 / AC-31 / AC-33b / AC-39 / AC-73 / AC-74 / AC-75 / AC-76 / AC-77 / AC-78 / AC-90 / AC-92 / AC-99 / AC-103 / AC-104 / **AC-106** / **AC-110** / **AC-112** / **AC-113** / **AC-117 / AC-118 / AC-119** / **AC-122** |
-| **M3** | 状态与监控 | 心跳 + 条件集 + 指标 + 诊断（JSON 结构见 AC-94）+ **消息监控（信封级）** + **自动重连语义** | AC-3 / AC-5 / AC-6 / AC-12 / AC-13 / AC-15 / AC-20 / AC-27 / AC-28 / AC-37 / AC-41 / AC-42 / AC-43 / AC-44 / AC-45 / AC-53 / AC-55 / AC-57 / AC-59 / AC-64 / AC-68 / AC-71 / AC-72 / AC-86 / AC-91 / AC-94 / AC-101 / **AC-105** / **AC-121** / **AC-123** |
+| **M1** | inproc 闭环 | 句柄表（代际）+ Runtime + 端点/连接模型 + **跨进程名字表（§6.4）** + **端点名格式/长度校验（§c-abi 5.1a）** + **手动驱动语义（`run_once` / `run_for`）** + `inproc` 传输（FR-3.5–3.12） | AC-4 / AC-11 / AC-25 / AC-32 / AC-33 / AC-36 / AC-40 / AC-80 / AC-81 / AC-82 / AC-83 / AC-84 / AC-89 / AC-100 / AC-102 / **AC-108** / **AC-109** / **AC-111** / **AC-114** / **AC-115** / **AC-116** / **AC-120** |
+| **M2** | TCP + 双向 | tcp 传输 + accept + connect + send/recv/subscribe + 异步排队超时 + **[线格式](api/wire-format.md)（HELLO 握手 · ERROR 帧 · 尺寸协商）** + **端点级套接字参数（`TCP_NODELAY` / backlog）** | AC-1 / AC-2 / AC-10 / AC-29 / AC-30 / AC-31 / AC-33b / **AC-33c** / AC-39 / AC-73 / AC-74 / AC-75 / AC-76 / AC-77 / AC-78 / AC-90 / AC-92 / AC-99 / AC-103 / AC-104 / **AC-106** / **AC-110** / **AC-112** / **AC-113** / **AC-117 / AC-118 / AC-119** / **AC-122** |
+| **M3** | 状态与监控 | 心跳 + 条件集 + 指标 + 诊断（JSON 结构见 AC-94）+ **消息监控（信封级）** + **自动重连语义** | AC-3 / AC-5 / AC-6 / AC-12 / AC-13 / AC-15 / AC-20 / AC-27 / AC-28 / AC-37 / AC-41 / AC-42 / AC-43 / AC-44 / AC-45 / AC-53 / AC-55 / AC-57 / AC-59 / AC-64 / AC-68 / AC-71 / AC-72 / AC-86 / AC-91 / AC-94 / AC-101 / **AC-105** / **AC-121** / **AC-123** / **AC-124** |
 | **M4** | 发现 | 组播 + 单播 seed + 节点身份 + 阶段二端点能力 + **[发现线格式](api/wire-format.md#8-发现报文阶段一--阶段二)** + **`connect_node` 地址解析** | AC-7 / AC-9 / AC-14 / AC-16 / AC-21 / AC-22 / AC-23 / AC-34 / AC-38 / AC-79 / AC-85 / AC-87 / AC-93 / **AC-107** |
-| **M5** | 本机 IPC | Linux unix socket + Windows 命名管道 | AC-P3 / AC-8 / AC-17 / AC-19 / AC-26 / AC-88 |
+| **M5** | 本机 IPC | Linux unix socket + Windows 命名管道 | AC-P3 / AC-8 / AC-17 / AC-19 / AC-26 / AC-88 / **AC-33d** |
 | **M6** | 平台与加固 | 麒麟/UOS 实机 + glibc 2.17 基线 + soak | AC-P1 / AC-P2 / AC-P3 / AC-P4 / AC-P5 / AC-E1 / AC-E2 / AC-E3 / AC-E4 / AC-E5 / AC-E6 |
 | **M7** | **v1.1** 载荷捕获与审计 | arena / 限速 / 双 TTL / dump / 审计 sink 回调（`audit_fn`）/ SLOW / **UDP 传输** / 错误环（FR-5.5b）/ `process_epoch`（FR-9.3） | AC-46 / AC-47 / AC-48 / AC-49 / AC-50 / AC-51 / AC-52 / AC-54 / AC-56 / AC-60 / AC-61 / AC-62 / AC-63 / AC-65 / AC-67 / AC-69 / AC-58 / AC-70 / AC-71b / AC-96 / AC-97 / AC-98 |
+
+> **M1 的关闭类 AC 按 inproc 观测口径验收**（2026-11-13）：M1 只实现 inproc，而 inproc 无 FIN / RST（见 c-abi §5.1b）。因此 **AC-33 / AC-114** 在 M1 上以「对端观测到断开通知驱动的 `connected = FALSE`」断言，**不**断言 FIN / RST。二者的 **tcp-FIN 观测**（连接被自动收回 / 无消费者端点 → FIN 而非 RST）由 **AC-33c** 在 **M2** 验收（AC-33b 测的是「回调内显式 `conn_destroy`」，触发路径不同，不能顶替）。
 
 ### 10.2 关键路径
 
