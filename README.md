@@ -167,4 +167,9 @@ iocomm_runtime_destroy(rt);
 
 ## 许可证
 
-待定。
+本项目按 Rust 生态惯例**双许可**：任选其一
+
+- [MIT 许可证](LICENSE-MIT)
+- [Apache License 2.0](LICENSE-APACHE)（含显式专利授权）
+
+除非另有明确说明，任何有意提交以纳入本项目的贡献，均按上述双许可授权，不附加额外条款。
