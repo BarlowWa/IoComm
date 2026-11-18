@@ -1,6 +1,6 @@
 # IoComm 待核实问题清单（2026-10-20）
 
-> **⚠️ 最新批次见 [§10 2026-11-05 第二轮复核](#10-2026-11-05-第二轮复核对-039fc19-的验收)——N-53 / N-54 契约缺陷已修，N-55 / N-57 / N-60（seed bootstrap 端口语义，2026-11-10 新增）待办，N-56 / N-58 已闭合，N-59 已核实（降 B4）**。
+> **⚠️ 最新批次见 [§10 2026-11-05 第二轮复核](#10-2026-11-05-第二轮复核-对-039fc19-的验收)——N-53 / N-54 契约缺陷已修；N-55 / N-57 / N-60 已于 2026-11-18 收口，N-61 / N-62 / N-63 已裁决落笔（见 §10.5）；N-56 / N-58 已闭合，N-59 已核实（降 B4）**。
 > 上一批 [§9](#9-2026-11-05-用户清单核实n-36--n-52) 的 N-36 ～ N-52 已全部落笔（**N-46 / N-47 于 2026-11-09 裁决，N-48 于 2026-11-10 裁决，三项均已落笔**）。
 > 此前批次：[§8 2026-11-03](#8-2026-11-03-新一轮核实) 的 15 条**全部已处置**（N-01 / N-02 / N-15 按方案 A、N-03 按方案 ①、N-04 ～ N-14 于 2026-11-04 收口），另新增 N-16 / N-17 / N-18 / N-19 四项（均已处置并落文档），不计入原 15 条。**
 > **2026-11-05 补充二**：用户清单核实新增 **[§9 N-36 ～ N-52 十七项](#9-2026-11-05-用户清单核实n-36--n-52)**——其中 **N-36 ～ N-41、N-49 ～ N-52 是 B1/B3 契约缺陷**（多处契约互斥，M0 冻结前必修），
@@ -429,9 +429,13 @@
 | 项 | 状态 | 说明 |
 |---|---|---|
 | **`diagnostic_dump` 的 `ep_owner == 0` 发送水位盲区** | **已闭合（2026-11-09，随 N-47 裁决）** | `connections[]` 条目新增 `ep` 与 `send_queue_depth`：无主出站连接报 `ep == 0` 并报**自身**队列深度。已落 C ABI `diagnostic_dump` 注释、AC-94 与 AC-122 |
-| **端点级条件订阅「订阅瞬间是否补推当前值」** | **未定口径，但已消除矛盾** | 现口径为「与连接级共用同一条规则」，两级不再打架；规则**本身**仍是开放的，由连接级先定 |
+| **端点级条件订阅「订阅瞬间是否补推当前值」** | **已定口径（2026-11-18，N-61）** | 定为「**订阅不补推初值、只推变化**」，与连接级同一口径。**同时修正了此前注释教反的顺序**：正确姿势是「**先订阅、后取初值**、允许重复投递」（条件集全量、幂等），因为「先取初值后订阅」会永久漏掉窗口内的变化而 `peer_status` 无序号可去重。详见 §10.5 N-61 |
 
 > **本节此前若再出现「未闭合」条目，一律先在本表登记再动手**——避免下一轮审查把同一问题当作新发现。
+>
+> **2026-11-18 更新**：本表两条**均已闭合**——上一条随 N-47（2026-11-09）；下一条随 **N-61**（2026-11-18，见 §10.5a）。
+> 至此 §9 / §10 无「未定口径」项，剩余只有 §10.4 的 N-55 / N-57 / N-60（已于 2026-11-18 收口）与
+> §10.6 的平台外部事实（**不阻塞**）。
 
 ### 9.7 本轮同时确认的既有结论（避免下轮重复排查）
 
@@ -470,15 +474,60 @@
   登记在本节，随 M0 冻结前的一次性「文档指针清理」统一处理。§9 已自述基线为 `39d7ad2`，
   这些行号仍可回溯到当时的证据。
 
-### 10.4 未修（登记，待后续）
+### 10.4 登记项（**2026-11-18：全部收口**）
 
 | ID | 严重度 | 项 | 说明 |
 |---|---|---|---|
-| **N-55** | B2 | **`iocomm_stats.send_queue_depth` / `recv_queue_depth` 语义零定义** | `c-abi.md` 的 `iocomm_stats` 里，`queue_dropped` / `protocol_errors` / `audit_events` 都有口径注释，唯独这两个裸字段没说「是全 Runtime 聚合还是快照时点瞬时值」。补一句注释即可，不涉 ABI |
+| **N-55** | B2 | **`iocomm_stats.send_queue_depth` / `recv_queue_depth` 语义零定义** | ~~原状：`c-abi.md` 的 `iocomm_stats` 里，`queue_dropped` / `protocol_errors` / `audit_events` 都有口径注释，唯独这两个裸字段没说「是全 Runtime 聚合还是快照时点瞬时值」。补一句注释即可，不涉 ABI~~<br>**已裁决并发**（2026-11-18，选 B「加字节字段」）：经三路行业调研（`.tmp_research/queue-depth-stats-survey.md`），结论与最初设想不同——**单位 = 条，聚合 = 取 max 而非求和**。理由：① 消息语义的系统一律报条数（ZeroMQ HWM / NNG / DDS `sample_count` / iceoryx `fifoSize` / MQTT `mqueue_len` / Kafka lag），只有字节流/内核缓冲报字节（libuv `write_queue_size` / `SIOCOUTQ`）；② **求和被否**——本库自己的 dump 注释已写死「同一端点的成员连接报同一队列的值、**不可相加**」，而外部消费者只拿得到逐连接读数，求和会把端点队列乘上成员数；行业做聚合的两家（RabbitMQ/Artemis）求和的是**互不重叠**的队列，Kafka 跨分区取 **max**（`records-lag-max`）；③ `ep_owner == 0` 的无主队列**计入**（否则 `queue_dropped` 在涨而 depth 恒 0）。**关键补充**：本库队列是「条数 + 字节」双约束，字节上限先触发的条件是**平均消息 > 64 KiB**（`queue_budget_bytes / queue_max`），此时条数会把「已满」读成「6%」——故**必须同时给字节**。落点：`iocomm_stats` 加 `send_queue_bytes` / `recv_queue_bytes`（取 max，与 depth 一一对应）+ `open_endpoints` / `discovered_peers` 一并补注释（同属零注释字段）；`diagnostic_dump` 的 `endpoints[]` 追加 `send_queue_bytes` / `send_queue_max` / `queue_budget_bytes` 以提供**分母**（stats 的 max 值不带分母，算不了填充率）；新增 **AC-125**（归 M3） | **C（2026-11-18，已落笔）** |
 | ~~**N-56**~~ | ~~B3~~ | ~~**`FR-5.4` 引用「§4 非目标表」是断链**~~ | **已闭合（2026-11-09，随 N-46 / N-47 裁决）**：`requirements.md` §4 非目标表已补「per-connection 的指标维度」一行，说明 FR-5.4 作用域 = 本 Runtime、`peer_status` 为何不带累加计数、逐连接队列水位走 `diagnostic_dump` |
-| **N-57** | B3 | **`runtime_node_id` 在 Stopped 下返 `CLOSED`，与状态机冲突** | 状态机写「只读查询不受影响」，而 `node_id` 是只读；同族 `runtime_node_name` **无**此码。二者应统一 |
+| **N-57** | B3 | **`runtime_node_id` 在 Stopped 下返 `CLOSED`，与状态机冲突** | ~~状态机写「只读查询不受影响」，而 `node_id` 是只读；同族 `runtime_node_name` **无**此码。二者应统一~~<br>**已裁决并发**（2026-11-18）：**状态机的「只读白名单」本身漏了它**，不只是矩阵单方面写错——`c-abi.md` §3.2.1 矩阵给 `runtime_node_id` 列了 `CLOSED`，而 §4 状态机的只读清单列了 `stats_snapshot` / `diagnostic_dump` 却**没列** `node_id` / `node_name`。处置：矩阵去掉 `CLOSED`；状态机白名单补两个查询函数。同批补一条登记缺口（X-2）：**「Stopped 下只读查询不受影响」此前无任何 AC**，AC-116 未覆盖——这是 N-57 能漂过评审的原因，故 AC-116 补第 ⑥ 项 | **C（2026-11-18，已落笔）** |
 | ~~**N-58**~~ | ~~B3~~ | ~~**inproc 的心跳 / `healthy` 语义未定义**~~ | **已裁决（2026-11-11，D-5）**：inproc **不跑心跳、不自动重连**。判据不是「离得近」——心跳解决「半开」（断了没人告诉你）与「对端卡死」（连着但不跑）两件事，inproc **免掉前者、免不掉后者**。故：① **卡死信号与 tcp 同构**（接收方不消费 → 接收队列满 → 发送方 `Transport::write` 返回 `WouldBlock` → **发送方发送队列**堆积 → 按端点策略丢弃并计**发送方** `queue_dropped`；inproc 与 tcp 共用同一段「写不动回 `WouldBlock`」的代码，区别只是「传输层」是接收队列 vs 内核缓冲）；② **断开改由直接通知驱动**（对端 Runtime 销毁 → `connected = FALSE` **条件值立即变**、断开**事件**延后到排空窗口结束，不经 `Reconnecting`，连接对象终结——对端先断时先入排空窗口、队列取空后才失效（本端销毁立即失效），应用重建拿**新句柄**）；**定序**：断开事件延后到**该连接的可交付残留为 0** 之后才推送（端点级只算该连接在端点队列中的项），本端主动销毁不排空；③ inproc 上 `lively` / `healthy` **恒 `TRUE`**（不存在 `UNKNOWN` 窗口；**不表示健康探测通过**），`last_heartbeat_ns` / `reconnect_count`（逐连接字段）**恒 0**、RTT 分位**无 inproc 样本**（仅当 Runtime 只有 inproc 连接时为 0）。**行业对照**：libzmq 的 inproc 同样受 HWM 约束、无重连、monitor 不覆盖 inproc（与本库一致）；nng 的 inproc 无界且有重连（本库有意不抄——无界是公认缺陷，重连是策略）。**盲区与 tcp 相同**：缓冲未满前无信号（不是 inproc 特有缺陷），per-connection 卡死定时器 v1 不做（进需求 §4 非目标）。**否掉「inproc 也跑心跳」**（要把定时器与 `HEARTBEAT` 帧从 M3 提前进 M1，为可直接观测的事付推测性检测成本）；**否掉「两条件恒 `UNKNOWN`」**（「不适用」与「窗口未满」共用一个值，监控侧无法区分，AC-86 需分叉）。落点：需求 **FR-3.11 / FR-3.12**（新增）、FR-5.1 / FR-4.4 补作用域、**AC-124**（新增，归 M3）、AC-86 / AC-123 标注 tcp；架构 §5.2b / §5.2c / §6.2；线格式 §7；c-abi §5.1b / `peer_status` / `stats`（含 `heartbeat_timeouts` / `reconnects`）/ `diagnostic_dump` / keepalive 非目标注 |
 | **N-59** | B4 | **QPC 跨处理器一致性与 tick 粒度** | 2026-11-10 时钟口径定为 Windows 用 `QueryPerformanceCounter`（架构 §6.5）。**跨处理器一致性已核实**：MS Learn《Acquiring high-resolution time stamps》原文——「the performance counter results are **consistent across all processors** in multi-core and multi-processor systems, even when measured on different threads or processes」；列出的例外仅限「**Pre-Windows Vista**」（非不变 TSC / TSC 同步算法不适配大量处理器）。产品最低要求 WS2016，**不落在例外范围内**。多时钟域的大型服务器上 Windows 会退化为 platform counter，原文称「still yields reliable time stamps」但访问延迟与伸缩性变差 ｜ **降为 B4，不再阻塞**。剩余唯一注意事项：**跨线程取的两个 QPC 值相差 ≤ 1 tick 时，先后顺序是模糊的**（原文：「When you compare performance counter results that are acquired from different threads, consider values that differ by ≤ 1 tick to have an ambiguous ordering」；本机 `freq = 14,318,180` ⇒ 1 tick ≈ 70 ns）。心跳/超时的判定窗口是毫秒级，70 ns 的模糊完全可忽略，**不需要在实现里特殊处理**。S1 Spike 可顺带记录本机 `QueryPerformanceFrequency` 值，无需专门做多 NUMA 实测 ｜ **已核实（2026-11-10）** |
-| **N-60** | B2 | **seed 的 bootstrap 端口语义为空**（2026-11-10 查 D-4 时发现，**与端口迁移无关**） | `wire-format.md` §8.1 **已规定查询目标端口 = 对端 `BEACON` 上报的实际源端口**，也要求 `BEACON` 的源端口必须被记录——**稳态没问题**。空白在 **bootstrap**：seed 要发的**第一条** `CAP_Q` 该发到哪个端口？此时还没有任何 `BEACON` 可依，而单播接收端口由对端运行时从 `23101..23200` 里**取第一个可用**挑出，本端**无从得知**。填组播口 `23100` 也不行——同机多个 Runtime 都 join 了该组且绑同一端口，**单播**发到该端口只会被其中一个 socket 收到（内核不按组播语义复制单播），这正是单播段存在的理由。于是「关组播 + 配 seed」这条 P0 路径（FR-2.4 / AC-7）的**首包寻址规则是未定义的** ｜ **未落笔，待定口径**。候选：① seed 只填 `<host>`（端口忽略）、接收端在端口区间**逐个探测**——代价是最多 100 次探测 × seed 数，且探测报文本身要定义；② seed 必须填完整 `host:port`，并对**区间内全部 100 个端口**逐个发送 `CAP_Q`——不需要新报文类型，代价同上；③ **bootstrap 用组播口 `23100` 收单播**——需在单播 socket **之外**再绑定组播口（组播 socket 已占该端口，Linux 需 `SO_REUSEADDR` + 额外 socket，Windows 上语义待验证），且**关组播的部署可能连防火墙都不通该端口**；④ **单播固定端口 + `SO_REUSEPORT`**——Windows 没有该选项，且与「单播 socket 不设 `SO_REUSEADDR`」的既有约束冲突；⑤ 引入专用的 `SEED_QUERY` 探测报文 + 固定接收端口。**建议先定 ①/② 的取舍再落笔**（两者都不新增报文类型、都在现端口块内），并在 AC-7 补可执行的地址构造步骤 ｜ **状态**：待定 |
+| **N-60** | B2 | **seed 的 bootstrap 端口语义为空**（2026-11-10 查 D-4 时发现，**与端口迁移无关**） | ~~原状：`wire-format.md` §8.1 已规定查询目标端口 = 对端 `BEACON` 上报的实际源端口，稳态没问题；空白在 bootstrap——seed 要发的第一条 `CAP_Q` 该发到哪个端口？单播接收端口由对端从 `23101..23200` 取第一个可用，本端无从得知。于是「关组播 + 配 seed」这条 P0 路径（FR-2.4 / AC-7）的首包寻址规则未定义。候选 ①–⑤ 见旧文~~<br>**已裁决并发**（2026-11-18，**选 ①**：`"<host>:0"` + 逐端口扫描）。（a）**否决 ②**（seed 只填 `<host>`）：协议行为与 ① 完全相同，唯一差别是字符串格式——为省两个字符改一次已写死的契约（`wire-format.md`「与 `listen_addr` 同格式」）不值得，且 `0 = 自动` 本就是全库约定（`c-abi.md:17`）。（b）**否决 ③**（组播口收单播）：同机所有 Runtime 都用 `SO_REUSEADDR` 绑 `23100`，**单播**没有组播语义、只会被其中一个吞掉——这正是文档自己给出的判据；且关组播的部署可能连防火墙都不开该口。（c）**否决 ④**（固定端口 + `SO_REUSEPORT`）：Windows 无此选项（`platform-support.md`），且多 socket 间内核负载均衡会让 `CAP_Q` 落到随机 Runtime。（d）**否决 ⑤**（新增 `SEED_QUERY`）：与 ④ 同根因（固定接收端口 = 每主机只能有一个 Runtime 收得到），修它需引入每主机应答代理，即 N-46 否决的中心进程；且动线格式。**落笔 7 条规则**（`wire-format.md` §8.1）：① 发起——`discovery_start` 后向 `host:23101..23200` 每端口发 `CAP_Q`（`node_id = 0` 通配），同 seed 100 包在 100 ms 内匀发、并发上限 16；② 应答——**必须从单播 socket 发出**（从组播 socket 回会让发起方学到 `23100`，稳态寻址当场失效）；③ 确认后回落稳态、不再扫描；④ 节点全过期后按租约周期重扫；⑤ **严格单向**（只让配置方发现对端）；⑥ **忽略 ICMP 端口不可达**噪声（`ECONNREFUSED` / `WSAECONNRESET` 不计 `protocol_errors`）；⑦ **`node_id == 0` 只是通配哨兵**，`NODE_ID` tag 读到 0 一律丢弃、自动模式保证生成非 0 值。**否决「让 seed 带 node_id」**：`node_id` 不提供端口信息，仍不知道往哪发。**AC-7 改为 4 步可执行地址构造 + 2 组对照**。代价：`100 × seed 数` 个 16 B 包的首次扫描（seed ≤ 16 时 ≤ 100 ms，满足 S3「1 s 内发现」） | **C（2026-11-18，已落笔）** |
 
 > **N-46 / N-47 的范围收窄**（复核发现）：N-46 的顺带项「`diagnostic_dump` 不在 §3.3 线程表」**已修**（`c-abi.md` 已标可跨线程、`architecture.md` §3.3 已补表），只剩「`conn_count` 与 §3.3 标『否』冲突」一项。N-47 的「唯一每连接水位在 dump」**只对发送方向成立**——`recv_queue_depth` 仍逐连接。**两项已于 2026-11-09 裁决并落笔**（见 §9.4）。
+
+---
+
+## 10.5 2026-11-18 P1 收口与队列预算重构（N-61 / N-62 / X-1 ～ X-3）
+
+> **来源**：对 §10.4 剩余项的核实（N-55 / N-57 / N-60 均成立），核实过程中新发现 **X-1 ～ X-3** 三项
+> 未登记缺口；用户随后提出「放宽单条消息限制、限制总队列大小」，引出 **N-62 队列预算重构**。
+> 三个决策各配一路或两路独立行业调研，报告在 `.tmp_research/`：`queue-depth-stats-survey.md`（N-55）、
+> `subscribe-initial-push-survey.md`（N-61）、`message-size-limits-survey.md`（N-62）。
+
+### 10.5a N-61：条件订阅不补推初值（原 X-1）
+
+| ID | 严重度 | 项 | 裁决 |
+|---|---|---|---|
+| **N-61** | **B2** | **条件订阅「建立时是否补推一次当前值」全库无口径，且不在任何待办里** | **定为「不补推、只推变化」**，并**修正了此前注释教反的调用顺序**。<br>**核实过程**：`c-abi.md` 原注释写「**在连接级该口径写死之前**，调用方应先用 `conn_status` 取初始值、只依赖变化推送」——它承认口径未定，但三级（文档 / 待办 / AC）全都指向「未定」却没人跟：AC-12 与 AC-121 都只断言变化，§9.6c 标「未定口径」。<br>**行业证据**（`subscribe-initial-push-survey.md`）：**只推变化是主流**——ZeroMQ RFC 29、Core NATS、Redis Pub/Sub、PostgreSQL `LISTEN`、DDS Status 回调、Java `PropertyChangeSupport`、C# `event`、Node `EventEmitter`、Boost.Asio、epoll/kqueue/IOCP 的注册动作**全部不回调**。补推初值存在，但 10+ 个系统里 **0 个设为默认**（MQTT `Retain Handling`、ROS 2 `TRANSIENT_LOCAL`、NATS JetStream、K8s `sendInitialEvents`、Rx `BehaviorSubject` 都是显式 opt-in）。<br>**为什么是「先订阅、后取初值」而不是反过来**：本结构体**没有序号**，无法对「初值」与「变化」去重——那么唯一可控的是**宁重勿漏**。PostgreSQL 官方原文：*"The first few received notifications might refer to updates already observed in the initial database inspection, but this is usually harmless."* 反之「先取初值、后订阅」会**永久漏掉**那个窗口内的变化。libusb `LIBUSB_HOTPLUG_ENUMERATE` 与本库逐条同构（官方明说会重复回调一次，且 `*callback_handle` 在回调全部跑完后才写出）。<br>**为什么不补推（硬伤）**：① 回调若在注册函数返回前同步触发，`out_sub` 尚未写出，回调内无法使用该句柄——**没有任何一家做到「注册函数内同步回调」且「输出句柄在回调期间可用」**，Asio 明文禁止（*"the completion handler will not be invoked from within this function"*）；② 端点级成员是动态集合，补推 = 订阅瞬间对全部现有成员各推一次，不是「变化」语义。<br>**落点**：`c-abi.md` §8 条件订阅注释重写（删「在连接级该口径写死之前」，写明「先订阅、后取初值、允许重复」及其理由）；**新增 AC-126**（归 M3，含「旧顺序会丢变化」的对照组）；§9.6c 对应行改为「已定」。<br>**关于 `peer_status` 无序号字段**：git 全历史确认它**从入库（`ef24ffd`）起就没有**，全库从未讨论过——不是一次被否决的决策，而是**当时无害的空白**（D-2 之前只有一个通道）。D-2（2026-11-09）让 `diagnostic_dump` 成为跨线程枚举入口后，才出现「值快照 + 变化流」双通道并存，无序号才成为实质缺陷。**加序号（尾部追加 `condition_seq`）登记为 v1.1 评估项，v1 不做**——理由与 N-47 否决「给 `peer_status` 加 per-conn 计数」相同（它是 `condition_fn` 的载荷，每次推送都会变重）；且按上面「先订阅」的顺序，序号不是必需的 |
+| **X-2** | B3 | **「Stopped 下只读查询不受影响」无任何 AC**（核实 N-57 时发现） | **已补**：AC-116 增加第 ⑥ 项（逐个调用只读入口，断言不返回 `CLOSED`）。这是 N-57 能漂过评审的原因——契约写了、验收没测 |
+| **X-3** | B3 | **`platform-support.md` §7「待核实」的 4 条未进本清单**（RHEL 7 ELS 日期矛盾、麒麟/UOS 生命周期、容器镜像、国产网卡 PTP） | **登记为 §10.6**。前两条是**外部事实待核实**（两份来源矛盾），后两条是**信息缺口**——与本清单其余「契约缺陷」性质不同，登记时分类标注，不计入契约缺陷计数 |
+
+### 10.5b N-62：队列字节预算与消息上限解耦
+
+| ID | 严重度 | 项 | 裁决 |
+|---|---|---|---|
+| **N-62** | **B2** | **`max_message_size` 硬顶 64 MiB 与每队列 64 MiB 字节上限被绑成一个乘法；每队列字节上限不可配置；队列无全局预算** | **解耦**。① **`max_message_size` 硬顶 64 MiB → 1 GiB**（1 GiB 而非 `uint32_t` 满值：`20 + tlv_len + payload_len` 求和逼近 4 GiB 会越过 `uint32_t`；且 1 GiB 单条在千兆网上已需 8 秒，超出「IO 通信」语义）；② **每队列字节上限独立成字段** `queue_budget_bytes`（默认 64 MiB）；③ **新增 Runtime 级总预算** `queue_total_bytes`（默认 256 MiB，含在途入站帧缓冲）；④ **空队列无条件接受一条消息**（故每队列实际上界 = 预算 + 一条最大消息）。<br>**为什么必须解耦**（`message-size-limits-survey.md`）：旧公式 `min(queue_max × max_message_size, 64 MiB)` 让「调大单条上限」意外放大队列内存，又反过来把单条上限**锁死在 64 MiB**。**行业里没有任何系统把队列字节预算写成「条数 × 单条上限」**——问卷 16 个系统中，RabbitMQ `x-max-length-bytes` 与 Artemis `max-size-bytes` 是唯一两种「每队列字节上限」，**两者默认都不设且可配**；Kafka `buffer.memory` / RabbitMQ 内存水位 / Artemis `global-max-size` 是**进程级总预算**；其余全按条数。**单条与预算是两个独立旋钮**，唯一形似绑定的是 RabbitMQ「包上限不得大于消息上限」的从属关系。<br>**1 MiB 默认值维持不变**：调研显示它属行业**保守档**（Kafka ≈1 MiB、NATS 1 MiB、SQS 1 MiB 同级；样本中位 ≈4 MiB），且与目标负载吻合，不随本次改动。<br>**「空队列无条件接受」的根据**：Kafka 原文 *"If the first record batch … is larger than this limit, the batch will still be returned to ensure that the consumer can make progress."* 不这样做则 `max_message_size > queue_budget_bytes` 时大消息永远进不了队列——这就是旧设计拒绝 `max_message_size > 64 MiB` 的真正原因，解耦后必须用另一条规则承接。<br>**按需分配**（核实中发现文档从未规定，见下「X-4」）：端点创建时**不**预分配字节预算——4096 端点 × 64 MiB = 256 GiB 起不来。三条上限都是**记账上限**，与监控侧 `max_bytes` 同一模式（架构 §6.1「队列内存模型」）。<br>**分配失败**：按目标端点策略处理（与超预算同口径）+ `log_fn` ERROR，**不新增错误码**。<br>**落点**：`runtime_config` / `tune_config` 尾部追加两字段；§6.0 公式重写为三层；§6.1 队列归属规则补字节记账口径；§5.0 优先级表；§3.2.1 矩阵（`create` / `reconfigure` 的 `INVALID_ARGUMENT` 条件）；§9.3 消息尺寸段；§10 发布前调整记录；FR-4.7 重写；**AC-100 重写为四子项 + N-63 追加两子项（共六）**；架构新增「队列内存模型」表、§4 非目标表补「按字节的 per-endpoint 精细化预算」 |
+
+| ID | 严重度 | 项 | 登记（**未裁决**） |
+|---|---|---|---|
+| **X-4** | B2 | **队列的内存分配模型在全库从未规定**（核实 N-62 时发现：只有监控侧写了「按需分配」，队列侧零命中） | **已随 N-62 落笔**：定为**按需分配**（三条上限都是记账上限）。理由：预分配在算术上不成立（4096 端点 × 64 MiB = 256 GiB）；且与监控侧「逻辑配额 + 按需分配」同一模式。**但顺带暴露一个真实分支**：`malloc` 失败时返回什么——现有错误码表里 `RESOURCE_EXHAUSTED` 在矩阵中只用于「句柄超限」与「监控开」；已定为「按端点策略处理 + `log_fn` ERROR」，不新增错误码 |
+| **N-63** | B2 | **端点级字节额度缺失**（用户 2026-11-18 追加要求） | **已裁决并发**：`endpoint_config` 尾部追加 `queue_budget_bytes`（0 = 用 runtime 值），作用于该端点的**全部队列**；**不做「按端点均分总量」**——端点是动态创建的，`max_handles` 只给上界 4096，均分后每端点仅 64 KiB，比一条默认消息还小。<br>**两层模型（RabbitMQ 同构）**：② 单队列字节 = **准入阈值**（端点可放宽/收紧），③ 总量 = **硬上限**（端点不能突破）。**两者必须同时满足**——端点把 `queue_budget_bytes` 提到 200 MiB，它仍会在全局 256 MiB 用尽时被拒。<br>**优先级链**：`endpoint_config` > `tune_config` > `runtime_config`（与 `queue_limit` 同构，见 §5.0）。<br>**默认值取宽松**：`queue_budget_bytes` 默认 64 MiB（端点一般无需设置）、`queue_total_bytes` 默认 256 MiB（= 4 个满队列的余量）——**不设硬性均分**，先到先得，最坏内存仍由总量封顶。<br>**落点**：`endpoint_config` 追加字段 + `ENDPOINT_CONFIG_INIT` 注释；§6.0 三层约束表重写（含三场景表）；§5.0 优先级表；§3.2.1 `endpoint_create` 矩阵；§6.1 队列归属规则；`runtime_config` / `tune_config` 注释补优先级链；`diagnostic_dump` 的 `endpoints[].queue_budget_bytes` 注明是**生效值**；FR-4.7 扩写；**AC-100 补 ⑤ ⑥ 两子项**（端点覆盖生效 / 端点不能突破总量）；架构「队列内存模型」表；需求 §4 非目标表改写 | **C（2026-11-18，已落笔）** |
+
+| **N-64** | B3 | **「Runtime 是资源隔离单位还是线程单位」在文档里没有明确陈述**（用户 2026-11-18 提问时暴露） | **已裁决并发**：**Runtime 是资源隔离的单位，不是线程单位**。三件事分开：① 一个 Runtime 用 owned **1 个**线程 / manual **0 个**；② 一个线程可驱动**任意多个** Runtime（manual 下依次 `run_once` 是合法形态）；③ 一个进程可有**任意多个** Runtime。<br>**为何是缺口**：架构 §3.1 的「IO 线程数固定为 1」写在「两种运行模式」表下，容易被读成「一个进程只有一个 Runtime」；而「多个 Runtime 并存」的事实只藏在 C ABI §6.0 一个列表项「每个 Runtime 有独立的句柄表与计数（AC-80 允许多个 Runtime 并存）」里。<br>**实际后果**：所有 per-Runtime 的资源上限（`max_handles` / `monitor_budget_bytes` / `queue_budget_bytes` / `queue_total_bytes`）都随 Runtime 个数**叠加**，库不做跨 Runtime 协调。部署方若按「进程一份」理解，会低估 `Runtime 数 × 257 MiB` 倍。<br>**否决「改成进程级共享配额」**：那需要在进程内引入跨 Runtime 的全局账本，直接违反 §5.1b「每 Runtime 独立」这条已沉淀进 `state_dir` 属主标记、AC-80 与状态机的基础约束；而收益只是省去部署方做一次除法。<br>**落点**：C ABI §6.0 新增「Runtime 是资源隔离单位，不是线程单位」条目（含核算公式）；架构 §3.1 补澄清块（三问三答表 + 推论）。<br>**连带项（同批补）**：核实「3 个小 Runtime 是否浪费内存」时发现**句柄表的分配模型全库未规定**——架构 §5.1 只写了槽位结构 `{kind, generation, object}`，没说预分配还是按需。**定为按需增长**：起始容量 ≤ 64 槽、倍增扩容、销毁时空闲复用但容量不收缩；`max_handles` 是**准入上限**而非内存预留（按 4096 槽 × ~24 B 预分配约 96 KiB/Runtime，Runtime 数可任意多，按需增长让「3 个小 Runtime」的实际占用是几个槽位）。落点：架构 §5.1 新增「槽位的分配模型」段；C ABI §6.0 的 `max_handles` 行补一句 |
+### 10.5c 本次核实的既有项结论
+
+- **N-55**：成立。补充两点核实结果——① 问题比登记写的更大（`iocomm_stats` 是 Runtime 级，而队列是 per-endpoint，必须定「如何折算」与「单位」，这两项登记里都没有）；② 同一行的 `open_endpoints` / `discovered_peers` **也零注释、全库零引用**，一并补。
+- **N-57**：成立。补充：**状态机的只读白名单本身漏了 `node_id` / `node_name`**，不只是矩阵单方面写错；且「只读不受影响」此前无 AC（X-2）。
+- **N-60**：成立。核实中新确定的约束：`wire-format.md` 全文**没有任何「收到 seed 后主动发送」的规定**——所以不管选哪个方案，都必须给 seed 路径补一段 bootstrap 探测规则，否则 seed 配了也不会有流量。
+- **N-56 / N-58**：闭合无误；**N-59**：已核实降级，无待办。
+
+### 10.6 平台侧待核实（原 platform-support §7，登记不阻塞）
+
+| 项 | 性质 | 说明 |
+|---|---|---|
+| **RHEL 7 ELS 结束日期** | **外部事实，两份来源矛盾**（2026-06 vs 2028-06） | 须向 Red Hat 核实。**不影响 v1**：`platform-support.md` 已澄清 RHEL 7 是 best-effort、不列入验收，glibc 2.17 基线顺带兼容它 |
+| **麒麟/UOS 的官方支持终止日期** | 外部事实，无统一公开生命周期表 | 多为合同项；到具体项目按合同处理 |
+| **麒麟/UOS 是否提供官方容器镜像** | 信息缺口 | 影响 CI 镜像来源；不阻塞设计 |
+| **国产网卡的 PTP 硬件时间戳支持** | 信息缺口 | 与 `clock_synced` 恒 0（N-11）无冲突——v1 不做时间同步；仅当 v2 引入 PTP 时才需要 |

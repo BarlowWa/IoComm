@@ -131,6 +131,7 @@ readelf --version-info libiocomm.so | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail 
 | **`/tmp` 1–3 天清理** | socket 文件放 `/run`，不放 `/tmp` |
 | **debuginfo 不可得** | 采购时索取 `kernel-devel` / `kernel-debuginfo` / SRPM |
 | **国产网卡驱动** | 不假设多队列/RSS；提供单队列退化；启动时输出 `ethtool` 自检 |
+| **seed 部署的防火墙要求**（2026-11-18，N-60） | 配置了 `seeds` 的一端会向 seed 主机的 **`23101..23200` 整段 100 个端口**各发一个 `CAP_Q`（bootstrap 扫描，[线格式 §8.1](api/wire-format.md)）。**seed 主机的防火墙必须放行该 UDP 段**——只开单个端口会漏：库无法预知对端从段内取了哪个端口。稳态只需对端 `BEACON` 上报的那一个端口，但 bootstrap 第一包必须扫全段。**建议规则**：`udp dport 23100-23200 accept`（含组播口 `23100`，若同时启用组播）。**不要**指望「配了 seed 就不用开组播口」——两条路径的端口要求不同，但都在同一段内 |
 
 ### 3.4 glibc 2.17 的注意点
 

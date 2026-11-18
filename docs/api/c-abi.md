@@ -169,16 +169,16 @@ const char* iocomm_strerror(int32_t code);  /* 静态存储期，不要 free */
 
 | 函数族 | 可能的错误码（`OK` 除外） |
 |---|---|
-| `iocomm_runtime_create` | `INVALID_ARGUMENT`（`cfg` 为 NULL / `max_message_size > 64 MiB` 或 **< 56 B**（见 §6.0）/ 枚举非法 / **`node_id == 0` 时 `state_dir` 为空或不可写**）、`CONFLICT`（`node_id == 0` 时 `state_dir` 的名字文件已被**另一存活进程**占用，见 `runtime_config.node_id` 注释）、`RESOURCE_EXHAUSTED`、`INTERNAL` |
+| `iocomm_runtime_create` | `INVALID_ARGUMENT`（`cfg` 为 NULL / `max_message_size > 1 GiB` 或 **< 56 B**（见 §6.0）/ `queue_budget_bytes` 或 `queue_total_bytes` 非 0 且 **< 1 KiB** / 枚举非法 / **`node_id == 0` 时 `state_dir` 为空或不可写**）、`CONFLICT`（`node_id == 0` 时 `state_dir` 的名字文件已被**另一存活进程**占用，见 `runtime_config.node_id` 注释）、`RESOURCE_EXHAUSTED`、`INTERNAL` |
 | `iocomm_runtime_start` | `STALE_HANDLE`、`INTERNAL`（Running 上重复调用幂等 `OK`）；**Stopped 下见下行**（`CLOSED`）。**无 `WOULD_DEADLOCK`、无 `TIMEOUT`、无 `WOULD_BLOCK`**——它不等待任何东西（manual 下只做状态迁移、不启动线程，见 §4） |
 | `iocomm_runtime_drain` | `STALE_HANDLE`、`WOULD_BLOCK`（**manual 模式**下仍有在途操作，见下方注释）、`TIMEOUT`（**owned 模式**等满 `timeout_ms` 仍未收敛；此时**不保证已排空**）、`WOULD_DEADLOCK`（**`timeout_ms > 0` 且在 loop 线程或回调内**——owned 下它要等 IO 线程收敛，等待即自锁；`timeout_ms == 0` 不等待，**不返回此码**）、`INTERNAL`（Stopped 下合法） |
 | `iocomm_runtime_stop` | `STALE_HANDLE`、`TIMEOUT`、`WOULD_DEADLOCK`（**loop 线程或回调内**且 `timeout_ms > 0`——它要等 IO 收敛，等待即自锁；`timeout_ms == 0` 不等待，**不返回此码**）、`INTERNAL`（Stopped 下幂等） |
-| **Stopped 下的其余写操作**（`runtime_start` / `endpoint_create` / `connect*` / `subscribe` / `*_send*` / `discovery_start` / `monitor_open` 等） | `CLOSED`（Runtime 已停止接受写；Stopped 不可重启，恢复需重建 Runtime；见 §4 状态机）。**只读查询不受影响**（`conn_status` / `stats_snapshot` / `endpoint_count` / `endpoint_get` / `discovery_snapshot_*` / `diagnostic_dump` 等照常） |
+| **Stopped 下的其余写操作**（`runtime_start` / `endpoint_create` / `connect*` / `subscribe` / `*_send*` / `discovery_start` / `monitor_open` 等） | `CLOSED`（Runtime 已停止接受写；Stopped 不可重启，恢复需重建 Runtime；见 §4 状态机）。**只读查询不受影响**——完整白名单见 §4 状态机表格（2026-11-18，N-57 起以那里为准） |
 | `iocomm_runtime_run_once` / `iocomm_runtime_run_for` | `STALE_HANDLE`、`INVALID_STATE`（**owned 模式**下调用）、`INTERNAL`；**`run_once` 另有 `TIMEOUT` = 本轮空闲**（正常事件，非故障，见下方注释）。**与 Runtime 状态无关**——manual 模式下 Created / Running / Stopped 均可调用（Stopped 下用于排空） |
-| `iocomm_runtime_reconfigure` | `STALE_HANDLE`、`INVALID_ARGUMENT`（含 `max_message_size` 非 0 时越出 56 B–64 MiB）、`CLOSED`（Stopped 后）、`INTERNAL` |
-| `iocomm_runtime_node_id` | `STALE_HANDLE`、`INVALID_ARGUMENT`（`out_node_id` 为 NULL，按 §3.2 通用出参规则）、`CLOSED`（Runtime 已 Stopped）、`INTERNAL` |
+| `iocomm_runtime_reconfigure` | `STALE_HANDLE`、`INVALID_ARGUMENT`（含 `max_message_size` 非 0 时越出 56 B–**1 GiB**、`queue_budget_bytes` / `queue_total_bytes` 非 0 时 < 1 KiB）、`CLOSED`（Stopped 后）、`INTERNAL` |
+| `iocomm_runtime_node_id` | `STALE_HANDLE`、`INVALID_ARGUMENT`（`out_node_id` 为 NULL，按 §3.2 通用出参规则）、`INTERNAL`。**无 `CLOSED`**——它是只读查询，Stopped 下照常可用（2026-11-18，N-57；与状态机的只读白名单一致） |
 | `iocomm_runtime_node_name` | `STALE_HANDLE`、`INVALID_ARGUMENT`（`buf` / `out_len` 为 NULL）、`RESOURCE_EXHAUSTED`（缓冲不足，`out_len` 给所需长度）、`INTERNAL` |
-| `iocomm_endpoint_create` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`ALREADY_EXISTS`（**同进程**已持有同名端点）、`CONFLICT`（端点名已被**他进程**占用）、`RESOURCE_EXHAUSTED`、`NOT_SUPPORTED`（未知 transport / 平台不支持）、`INTERNAL` |
+| `iocomm_endpoint_create` | `STALE_HANDLE`、`INVALID_ARGUMENT`（含 **`queue_budget_bytes` 非 0 且 < 1 KiB**）、`ALREADY_EXISTS`（**同进程**已持有同名端点）、`CONFLICT`（端点名已被**他进程**占用）、`RESOURCE_EXHAUSTED`、`NOT_SUPPORTED`（未知 transport / 平台不支持）、`INTERNAL` |
 | `iocomm_endpoint_destroy` / `iocomm_conn_destroy` / `iocomm_conn_abort` | `STALE_HANDLE`、`WOULD_DEADLOCK`（**两种情况**：① 回调内调 **`iocomm_endpoint_destroy`**——`@forbid` 无条件禁止，`@special` 无对应例外；② 回调内销毁**非本回调交付的**连接 / 订阅。销毁**本回调交付的**连接是 `@special` 允许的，不返回此码。见 §6.4 回调规则）、`INTERNAL` |
 | `iocomm_runtime_wakeup` | **无错误通道**（AC-95 豁免）；返回值为错误码，无 `err` 出参 |
 | `iocomm_endpoint_lookup` / `iocomm_endpoint_get` / `iocomm_conn_get` / `iocomm_discovery_snapshot_get` | `STALE_HANDLE`、`NOT_FOUND`、`INVALID_ARGUMENT`、`INTERNAL`（`snapshot_get` 另有 `NOT_FOUND` = index 越界） |
@@ -199,7 +199,7 @@ const char* iocomm_strerror(int32_t code);  /* 静态存储期，不要 free */
 | `iocomm_conn_send_async` / `iocomm_endpoint_send_async` | 同步返回：`STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`、`TOO_LARGE`、`WOULD_DEADLOCK`、`CLOSED`、`RESOURCE_EXHAUSTED`（`op_id` 空间耗尽，见 §6.2）、`INTERNAL`；其余走 `on_done` |
 | `iocomm_send_cancel` | `STALE_HANDLE`、`NOT_FOUND`（op 已完成）、`INVALID_ARGUMENT`、`INTERNAL` |
 | `iocomm_endpoint_recv` / `iocomm_conn_recv` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`INVALID_STATE`（已 subscribe；**`conn_recv` 另有「该连接已由端点级订阅 / 拉取持有」——此时路由在端点队列，且该情形 `err` 照常填充**，见 §6.4）、**`DISCONNECTED`（仅 `conn_recv` 的返回码，且仅 inproc 排空窗口：连接已断开且可交付残留已取空——先取空、再报此码，2026-11-13；tcp 上 `conn_recv` 不返回它，重连期间句柄有效、`conn_recv` 按 FIFO 正常返回；与 `on_done(DISCONNECTED)` 是不同通道，后者见 §5.2 取消表）**、`TIMEOUT`、`WOULD_DEADLOCK`、`CLOSED`、`INTERNAL` |
-| `iocomm_discovery_start` | `STALE_HANDLE`、`INVALID_ARGUMENT`、`ALREADY_EXISTS`（已启动）、`NOT_SUPPORTED`、`RESOURCE_EXHAUSTED`、`INTERNAL` |
+| `iocomm_discovery_start` | `STALE_HANDLE`、`INVALID_ARGUMENT`（含 **seed 格式非法**——非 0 port / 空 host / 解析失败 / 长度 > 255 B / `seed_count > 0` 而 `seeds` 为 NULL，见 `discovery_config.seeds` 注释）、`ALREADY_EXISTS`（已启动）、`NOT_SUPPORTED`、`RESOURCE_EXHAUSTED`、`INTERNAL` |
 | `iocomm_discovery_stop` | `STALE_HANDLE`、`INVALID_STATE`（未启动）、`WOULD_BLOCK`、`TIMEOUT`、`INTERNAL` |
 | `iocomm_discovery_snapshot_take` | `STALE_HANDLE`、`RESOURCE_EXHAUSTED`、`INTERNAL` |
 | `iocomm_discovery_snapshot_release` | **无错误通道**（AC-95 豁免）：返回值承载——`0` = 成功，`ICOMM_ERR_STALE_HANDLE` = 重复释放或快照句柄已失效，`ICOMM_ERR_INTERNAL` = 内部错误 |
@@ -289,9 +289,9 @@ typedef struct iocomm_runtime_config {
     uint64_t    node_name_len;
 
     /* 默认队列与溢出策略；端点级覆盖见 endpoint_config */
-    uint32_t send_queue_max;       /* 0 = 默认（1024 条） */
-    uint32_t recv_queue_max;       /* 0 = 默认（1024 条） */
-    uint32_t max_message_size;     /* 0 = 默认（1 MiB） */
+    uint32_t send_queue_max;       /* 0 = 默认（1024 **条**） */
+    uint32_t recv_queue_max;       /* 0 = 默认（1024 **条**） */
+    uint32_t max_message_size;     /* 0 = 默认（1 MiB）；**上限 1 GiB**、下限 56 B（见 §6.0） */
     uint32_t max_handles;          /* 0 = 默认（4096）；本 Runtime 内**五类对象句柄合计**上限（不含 Runtime 自身，见 §6.0） */
 
     /* ICOMM_OVERFLOW_*；0 = DROP_OLDEST（见 §6.1） */
@@ -308,6 +308,22 @@ typedef struct iocomm_runtime_config {
     /* 审计 sink（可选；v1.1）。见 §9.5 */
     iocomm_audit_fn audit_fn;
     void* audit_user;
+
+    /* ── 队列字节预算（2026-11-18 尾部追加，N-62；0 = 默认值）──
+     * 两层，**互相独立**，且**都不再与 `max_message_size` 相乘**：
+     *  - `queue_budget_bytes`：**每条**收发队列的字节上限，默认 **64 MiB**；
+     *  - `queue_total_bytes` ：本 Runtime **全部**收发队列的字节总预算，默认 **256 MiB**，
+     *    含**在途入站帧缓冲**（已分配、尚未入队的接收缓冲，见 §6.0）。
+     * 「队列」的计数口径见 §6.1「队列归属规则」：端点发送队列 / 端点接收队列 /
+     * 每连接接收队列 / 无主出站连接的发送与接收队列，各算一条。
+     * **按需分配**：两者都是**记账上限**，不是预留量——空队列不占内存（见架构 §6.1「队列内存模型」）。
+     * **实际内存上界 = `queue_budget_bytes + max_message_size`**（空队列无条件接受一条消息，
+     * 见 §6.0 规则），总预算同口径。
+     * 非 0 且小于 1 KiB → `INVALID_ARGUMENT`；`0` = 用默认值。可经 `tune_config` 热更新。
+     * **端点级覆盖**：`endpoint_config.queue_budget_bytes` 可放宽/收紧单个端点（2026-11-18，N-63）；
+     * `queue_total_bytes` **没有**端点级对应字段，且**不按端点均分**。 */
+    uint64_t queue_budget_bytes;
+    uint64_t queue_total_bytes;
 } iocomm_runtime_config;
 
 /* C99 分部初始化：未列出的成员自动置零。 */
@@ -326,7 +342,7 @@ int32_t iocomm_runtime_create(const iocomm_runtime_config* cfg,
  * |---|---|
  * | **Created**（create 后、start 前） | 创建端点 / 连接 / 订阅 / 监控者 / 启动发现；消息可入队但**不会发出** |
  * | **Running** | 全部操作 |
- * | **Stopped**（stop 后） | 只能 `stop`（幂等）/ `drain` / `destroy` / **`run_once` / `run_for`** / 只读查询；**其余写操作**返回 `ICOMM_ERR_CLOSED`；句柄仍然有效。**自动重连属于写操作 → 停止**；已登记的 `on_done` 仍会触发。**`run_once` 在 Stopped 下合法**——manual 模式的 `drain` 正需要继续驱动 loop 才能排空 |
+ * | **Stopped**（stop 后） | 只能 `stop`（幂等）/ `drain` / `destroy` / **`run_once` / `run_for`** / 只读查询；**其余写操作**返回 `ICOMM_ERR_CLOSED`；句柄仍然有效。**自动重连属于写操作 → 停止**；已登记的 `on_done` 仍会触发。**`run_once` 在 Stopped 下合法**——manual 模式的 `drain` 正需要继续驱动 loop 才能排空。**只读查询的完整白名单**（2026-11-18，N-57 补全）：`conn_status` / `stats_snapshot` / `endpoint_count` / `endpoint_get` / `endpoint_lookup` / `conn_get` / `conn_count` / `discovery_snapshot_take/count/get/release` / `diagnostic_dump` / `runtime_node_id` / `runtime_node_name` / `endpoint_local_addr` / `monitor_get_stats`——**凡是只读的都在此列**，不受 `CLOSED` 影响 |
  * | 已销毁 | 任意入口返回 `ICOMM_ERR_STALE_HANDLE` |
  *
  * - `start` 在 Running 上重复调用返回 `ICOMM_OK`（幂等）；在 Stopped 上调用返回 **`ICOMM_ERR_CLOSED`**
@@ -371,7 +387,7 @@ int32_t iocomm_runtime_drain(iocomm_runtime_t rt, uint64_t timeout_ms, iocomm_er
 /* 热重配置：只接受**通信参数**，不接受业务参数。
  * 入参为 iocomm_tune_config；创建期参数（driver_mode / node_id / state_dir /
  * node_name / log_fn / audit_fn / max_handles / monitor_budget_bytes）不可热更新。
- * **`max_message_size` 与创建期同口径校验**：非 0 时须落在 **56 B – 64 MiB**，越界 →
+ * **`max_message_size` 与创建期同口径校验**：非 0 时须落在 **56 B – 1 GiB**，越界 →
  * `INVALID_ARGUMENT`（**整次调用被拒，其余字段不生效**；热改只影响此后新建的连接，
  * 已握手连接保持握手时冻结的值，见架构 §3.2）。
  * 字段优先级与作用域见 §5.0「配置优先级」。 */
@@ -405,9 +421,18 @@ typedef struct iocomm_tune_config {
     uint8_t  tcp_nodelay;        /* 0 = 保持；1 = 开；2 = 关；非 0/1/2 → INVALID_ARGUMENT */
     uint8_t  reserved9[5];       /* 补齐 8 B 尾块（1 + 5 + 2），避免隐式尾填充 */
     uint16_t listen_backlog;     /* 0 = 保持；否则 ≥ 1 的 backlog（仅对新建监听 socket 生效） */
+
+    /* ── 队列字节预算（2026-11-18 尾部追加，N-62；0 = 保持当前）──
+     * 与 `runtime_config` 的同名字段同义（见那里）。热更新**立即生效**于
+     * 「此后入队 / 分配」的判定；**已在队列中的消息不回溯驱逐**——
+     * 调小后新占用受限、旧占用自然消化，直到降到新预算以下。
+     * `queue_total_bytes` 的记账因此可能**短暂高于**新设值。
+     * **端点级优先级**：`endpoint_config.queue_budget_bytes` 非 0 时**压过**本字段（N-63）。 */
+    uint64_t queue_budget_bytes;
+    uint64_t queue_total_bytes;
 } iocomm_tune_config;
 
-/* C99 分部初始化：未列出的成员自动置零 → 两个套接字字段均为 0 = 保持当前值。 */
+/* C99 分部初始化：未列出的成员自动置零 → 套接字与预算字段均为 0 = 保持当前值。 */
 #define ICOMM_TUNE_CONFIG_INIT \
   { { sizeof(iocomm_tune_config), ICOMM_ABI_MAJOR, ICOMM_ABI_MINOR, 0, 0, 0 } }
 
@@ -517,6 +542,7 @@ const iocomm_abi_header* iocomm_abi_version(void);
 | `send_queue_max` / `recv_queue_max` | ✅ 默认值 | ✅ `queue_limit` 覆盖 | ✅ 只改**未被子端点级显式设置**的端点 | 端点级 > tune |
 | `overflow_policy` | ✅ `default_overflow_policy` | ✅ `overflow_policy` 覆盖 | ✅ 只改**未被端点级显式设置**的端点 | 端点级 > tune |
 | `max_message_size` | ✅ 默认值 | — | ✅ 全部端点 | runtime → tune |
+| `queue_budget_bytes` / `queue_total_bytes` | ✅ 默认值 | ✅ `queue_budget_bytes` 覆盖 | ✅ 全部队列 | 端点级 > tune（**仅** `queue_budget_bytes`；`queue_total_bytes` 无端点级） |
 | `max_handles` | ✅ 仅创建期 | — | ❌ | 不可热更新 |
 | `heartbeat_ms` / `heartbeat_miss_limit` | — | — | ✅ 仅运行期 | 热更新 |
 | `iface_index` | — | ✅ 作用：**端点监听 + 该端点的发送/组播** | ✅ 作用：**全部端点 + 发现** | 见下 |
@@ -569,10 +595,17 @@ typedef struct iocomm_endpoint_config {
     uint8_t  reserved9[5];       /* 补齐 8 B 尾块（1 + 5 + 2），避免隐式尾填充 */
     uint16_t listen_backlog;     /* 0 = 默认 **128**；否则为该监听 socket 的 backlog。
                                   * backlog 溢出表现为连接被拒（对端 connect 超时/被拒），本端无计数可观测 */
+
+    /* ── 队列字节预算（2026-11-18 尾部追加，N-63；0 = 用 runtime 值）──
+     * 覆盖 `runtime_config.queue_budget_bytes`，作用于**该端点的全部队列**
+     * （端点发送队列 + 端点接收队列；无主出站连接不受影响，仍用 runtime 值）。
+     * **两个方向各算各的**——发送队列与接收队列**各自**受这个上限约束，
+     * **不是**两者合计（合计由 `queue_total_bytes` 管，且**不**按端点均分）。 */
+    uint64_t queue_budget_bytes;
 } iocomm_endpoint_config;
 
 /* C99 分部初始化：未列出的成员自动置零
- * → tcp_nodelay = 0（默认开）、listen_backlog = 0（默认 128）。 */
+ * → tcp_nodelay = 0（默认开）、listen_backlog = 0（默认 128）、queue_budget_bytes = 0（用 runtime 值）。 */
 #define ICOMM_ENDPOINT_CONFIG_INIT \
   { { sizeof(iocomm_endpoint_config), ICOMM_ABI_MAJOR, ICOMM_ABI_MINOR, 0, 0, 0 } }
 
@@ -1049,15 +1082,67 @@ int32_t  iocomm_conn_get  (iocomm_runtime_t rt, iocomm_endpoint_t ep,
 
 | 参数 | 默认 | 单位 | 说明 |
 |---|---|---|---|
-| `send_queue_max` | **1024** | 条 | 每个端点的发送队列上限 |
+| `send_queue_max` | **1024** | 条 | 每个端点的发送队列上限（**条数方向**的约束，不是保证深度） |
 | `recv_queue_max` | **1024** | 条 | 每个端点的接收队列上限 |
-| `max_message_size` | **1 MiB** | 字节 | 见 §9.3；**上限 64 MiB**（超过则单条消息永远进不了队列）；**下限 56 B**（`20` 帧头 + `SEQ`/`TS_SEND`/`SOURCE_NODE` 三项必填 TLV 共 36 B，低于此值则任何 `DATA` 帧都无法通过校验） |
-| `max_handles` | **4096** | 个 | 本 Runtime 内**五类对象句柄合计**（endpoint / conn / subscription / snapshot / monitor），**不含 Runtime 自身**（Runtime 是句柄表的主人，不占名额）；**入站连接只在交付时计入**——双向 HELLO 完成后 `accept` 分配 conn 句柄时才占用；**握手期的内部会话占位不分配句柄、不占名额**（§5.2、线格式 §5） |
+| `max_message_size` | **1 MiB** | 字节 | 见 §9.3；**上限 1 GiB**；**下限 56 B**（`20` 帧头 + `SEQ`/`TS_SEND`/`SOURCE_NODE` 三项必填 TLV 共 36 B，低于此值则任何 `DATA` 帧都无法通过校验） |
+| `queue_budget_bytes` | **64 MiB** | 字节 | **每条**收发队列的字节上限（**与 `max_message_size` 无关**，不与之相乘）。**可被 `endpoint_config.queue_budget_bytes` 覆盖**（N-63） |
+| `queue_total_bytes` | **256 MiB** | 字节 | 本 Runtime **全部**收发队列的字节总预算，含在途入站帧缓冲。**无端点级覆盖、不按端点均分**（N-63） |
+| `max_handles` | **4096** | 个 | 本 Runtime 内**五类对象句柄合计**（endpoint / conn / subscription / snapshot / monitor），**不含 Runtime 自身**（Runtime 是句柄表的主人，不占名额）；**入站连接只在交付时计入**——双向 HELLO 完成后 `accept` 分配 conn 句柄时才占用；**握手期的内部会话占位不分配句柄、不占名额**（§5.2、线格式 §5）。**槽位按需增长、不按本值预分配**（架构 §5.1），故它是**准入上限**而非内存预留 |
 
-- 队列上限**同时**受条数与字节约束：条数 ≤ `queue_max`，字节总量 ≤ `min(queue_max × max_message_size, 64 MiB)`。
-- `max_message_size > 64 MiB` → `runtime_create` 返回 `INVALID_ARGUMENT`（否则单条消息永远进不了队列）。
-- **字节上限**：`runtime_config` **不提供独立字段**（避免多一个旋钮）。超过字节上限时按该端点策略处理（与条数满同口径）。
-- 默认值下：条数上限 1024 条，字节上限 64 MiB 每队列。最坏情况（消息都是 1 MiB）是 **64 条即满**，而不是 1024 条。
+**队列的三层约束（唯一口径，2026-11-18 定，N-62 / N-63）**：
+
+队列上限**同时**受三条独立约束，**全部生效、任一不满足即按端点策略处理**：
+
+```
+① 条数          ≤ send_queue_max / recv_queue_max                       （默认 1024 条）
+② 单队列字节    ≤ queue_budget_bytes + max_message_size                  （默认 64 MiB + 1 MiB）
+                  queue_budget_bytes 取值链：endpoint_config > tune_config > runtime_config
+③ 全部队列字节  ≤ queue_total_bytes + max_message_size                   （默认 256 MiB + 1 MiB，无端点级覆盖）
+```
+
+**② 是「准入阈值」，③ 是「硬上限」——两者必须都满足才放行**（2026-11-18，N-63）：
+
+| 场景 | ② 单队列预算 | ③ 总量预算 | 结果 |
+|---|---|---|---|
+| 默认 | 队列 A 已达 64 MiB | 总量 100 MiB / 256 MiB | A 拒收（撞 ②），其他队列不受影响 |
+| 端点放宽 | A 的 `queue_budget_bytes = 200 MiB`，已用 200 MiB | 总量 200 MiB / 256 MiB | A 拒收（撞 ②）；其他队列仍可用剩下的 56 MiB |
+| 总量先到 | A 预算 200 MiB、仅用 30 MiB | 全部队列合计已达 256 MiB | **A 也拒收**（撞 ③）——任何端点都不能突破总量 |
+
+> **不做「按端点均分」**（N-63）：`queue_total_bytes` 是**先到先得**的水位，不切成每端点固定额度。
+> 理由：均分需要知道端点总数，而端点是动态创建的，`max_handles` 只给上界（4096）——
+> 均分后每端点只有 `256 MiB / 4096 = 64 KiB`，比一条默认消息还小，设计立刻失效。
+> 这与 RabbitMQ 同构：每队列 `x-max-length-bytes`（可选、宽松）+ 全局内存水位（硬顶）。
+
+> **为什么字节上限有两个 `+ max_message_size`**：单条消息不可分割。若一条消息大于当前队列的剩余字节，
+> 而队列**为空**，它仍然**无条件入队**（②，见下）；③ 同理。这与 Kafka 的口径一致
+> （*"If the first record batch … is larger than this limit, the batch will still be returned to ensure that
+> the consumer can make progress."*）。**所以「每队列实际内存上界 = `queue_budget_bytes + max_message_size`」
+> 是设计的一部分，不是估算误差。** 队列**非空**时，本条消息必须满足 `已用字节 + 本条 ≤ queue_budget_bytes`。
+
+- **字节上限不再由 `max_message_size` 推导**（2026-11-18 废止旧公式 `min(queue_max × max_message_size, 64 MiB)`）。
+  旧公式让「调大单条上限」意外放大队列内存，且使调大单条上限受队列预算反锁（`max_message_size > 64 MiB` 被拒绝）。
+  新口径下两者**各自独立可配**：`max_message_size` 最大 **1 GiB**，与队列预算无交叉校验。
+  **否决的备选**：保留「创建时校验 `queue_budget_bytes ≥ max_message_size`」——`tune_config` 与端点级覆盖会让
+  交叉校验成矩阵，且仍需处理「配置变了之后已有大消息在途」的边界。
+- `max_message_size > 1 GiB` → `runtime_create` / `reconfigure` 返回 `INVALID_ARGUMENT`（**上限 1 GiB 而非
+  `uint32_t` 满值**：`20 + tlv_len + payload_len` 的求和若逼近 4 GiB 会在实现里越过 `uint32_t`；
+  且 1 GiB 单条在千兆网上传输已需 8 秒以上，超出「IO 通信」语义）。
+- 触发 ② / ③ 时**按该端点策略处理**（与条数满同口径，见 §6.1）：`DROP_OLDEST` / `DROP_NEWEST` 丢弃并计
+  `queue_dropped`；`ERROR` 返回 / 回调 `WOULD_BLOCK`。**不新增错误码**——调用方看到的语义与「队列满」完全一致。
+- **在途入站帧缓冲计入 ③**（2026-11-18）：接收方在「已读满 20 B 帧头、判定未超限」到「整帧收完、入队」之间
+  持有的缓冲，按已分配字节记入 `queue_total_bytes`。**不单设计数器**——理由见 §9.3（`max_message_size` 放宽到
+  1 GiB 后，若不在途计入总量，N 条连接同时建帧可占 `N × max_message_size`）。
+- **按需分配**：以上三条都是**记账上限**，不是预留量。端点创建时**不**分配 64 MiB（否则 4096 端点会占 256 GiB），
+  队列项按入队时分配、出队时释放（与 §9.3 监控环的「逻辑配额 + 按需分配」同一模式，见架构 §6.1「队列内存模型」）。
+- **分配失败**（`malloc` 失败）：按目标端点策略处理，与 ② / ③ 超限同口径；另写 `log_fn` 的 **ERROR**
+  （含端点名）。这是唯一不改变 ABI 的处理方式——不新增「内存不足」错误码。
+- **默认值下的实际容量**：1 MiB 消息填满队列时是 **64 条**（`queue_budget_bytes = 64 MiB`，无余量），
+  下一条消息**只有在队列被取空后才进得去**——即「空队列无条件接受」只覆盖「队列为空」的情形，
+  **不**额外增加一条余量。小消息（≤ 64 KiB）时是 **1024 条**（条数先到）。
+  **`send_queue_max` 是条数方向的上限，不是保证深度**；`send_queue_max × max_message_size` 也不再是内存上界。
+- 内存上界（便于部署侧核算）：**每队列 ≤ `queue_budget_bytes + max_message_size`**，
+  全部队列 ≤ `queue_total_bytes + max_message_size`。默认下分别是 65 MiB 与 257 MiB。
+  **端点放宽单队列预算不会抬高总量上限**——③ 恒定封顶，所以最坏内存仍受 `queue_total_bytes` 约束。
 - 句柄超限：`endpoint_create` / `connect*` / `subscribe` / `conn_subscribe` / `discovery_snapshot_take` / `monitor_open` 一律返回 `ICOMM_ERR_RESOURCE_EXHAUSTED`。
 - **握手期内部会话的上限（2026-11-03 定，2026-11-04 补口径 N-18）**：交付前（双向 HELLO 完成前）的入站会话不占 `max_handles`，但**并非无界**——**每端点**并发握手会话数 ≤ `max_handles`（**独立计数器**，与五类对象句柄表互不占用，AC-84 不受影响），超出时**直接关闭新接受的 socket**（不触发 `accept` 回调）。
   **总上限因此是 `端点数 × max_handles`**（默认 4096 × 4096 ≈ 1.7e7）——它是一个**软上界**，不等于「Runtime 全局 fd 上限」。因此：
@@ -1072,6 +1157,17 @@ int32_t  iocomm_conn_get  (iocomm_runtime_t rt, iocomm_endpoint_t ep,
   **调用方如何自查容量**：`iocomm_conn_count(rt, 0)` 是**实时存活连接数**（含 `ep_owner == 0` 的连接），可以直接读；但**五类对象句柄合计（Runtime 不占）的占用没有公开计数**——调用方须据 `max_handles` 与自己创建的端点 / 订阅 / 快照 / 监控者数量自行估算。两者之差（如"连接数远小于 `max_handles` 却仍被拒"）说明名额被非连接类句柄占住。验收：**AC-113**。
 - **每个 Runtime 有独立的句柄表与计数**（AC-80 允许多个 Runtime 并存）。
 
+- **Runtime 是「资源隔离的单位」，不是「线程单位」（2026-11-18 澄清，N-64）**：
+  - Runtime 持有**自己的**句柄表、队列、连接、订阅、监控者，以及**至多一个**事件循环线程
+    （owned 模式自带 1 个；manual 模式**一个都没有**，loop 由调用方线程驱动——见架构 §3.1 / §3.2）；
+  - **多个 Runtime 可以跑在同一个线程上**：manual 模式下在同一个循环里依次 `run_once` 多个 Runtime 是合法且
+    被支持的形态（AC-80 的「同进程两个 Runtime 互发 inproc」就是它）；owned 模式下每个 Runtime **各占**一个线程；
+  - 因此 `max_handles` / `monitor_budget_bytes` / `queue_budget_bytes` / `queue_total_bytes` **全部是 per-Runtime 的**，
+    作用域严格等于**一个 Runtime 实例**，**库不做跨 Runtime 的协调**——同进程 N 个 Runtime 就是 N 份独立预算。
+  - **部署侧必须自己核算总量**：进程内上界 = `Runtime 数 × (queue_total_bytes + max_message_size)`，再乘进程数；
+    括号内默认值 = 257 MiB。**线程数不参与这个算式**——决定因素只有 Runtime 实例个数。
+  - 这与 `state_dir` 属主标记（§5.1b，强制「每 Runtime 独立」）是同一取向：v1 不提供进程级 / 主机级的共享配额。
+
 ### 6.1 溢出策略（每端点一个队列）
 
 ```c
@@ -1079,7 +1175,8 @@ int32_t  iocomm_conn_get  (iocomm_runtime_t rt, iocomm_endpoint_t ep,
  * **队列归属规则（唯一口径）**：
  *   - **成员连接**（`ep_owner == ep` 的出站连接，以及被监听端点持有的入站连接——见 §5.2）
  *     共用该端点的**一条发送队列**——这是 FR-4.6 的有界资源，
- *     容量 `send_queue_max` **条**，且字节总量 ≤ **64 MiB**（§6.0）——**发送队列**的占用上界与连接数无关；
+ *     容量 `send_queue_max` **条**，且字节总量 ≤ `queue_budget_bytes + max_message_size`
+ *     （`queue_budget_bytes` 可按端点覆盖，默认 64 MiB；§6.0）——**发送队列**的占用上界与连接数无关；
  *     接收方向则是「端点一条 + 每连接各一条」，总数随连接数增长（上界 = `(1 + N) × recv_queue_max`）；
  *   - **每个队列项都携带目标连接句柄**（`conn_send` 填该连接；`endpoint_send` 扇出时为 N 个独立项）；
  *   - **入站连接**：在**交付时点（双向 HELLO 完成）**才可能进入 `accept` 回调，回调内即确定为「拒绝」还是「持有」——
@@ -1089,9 +1186,17 @@ int32_t  iocomm_conn_get  (iocomm_runtime_t rt, iocomm_endpoint_t ep,
  *     **`CLOSE_AFTER` 不是持有动作**（FR-8.8「发送不是所有权开关」）：它只把连接保持到数据 flush
  *     完毕并立即关闭，因此**不产生成员资格**、不参与扇出、不分配发送队列。
  *     > 2026-11-03 修正 N-01：此前「按不归属端点处理、各自一条队列、不参与扇出」的规定已废止——它使纯服务端无法广播。
- *   - 不归属任何端点的连接（`ep_owner == 0` 的出站连接）各自有一条队列，容量取 runtime 默认；
+ *   - 不归属任何端点的连接（`ep_owner == 0` 的出站连接）各自有一条**发送队列 + 接收队列**，
+ *     条数容量取 runtime 默认，字节预算同 §6.0（`queue_budget_bytes` / `queue_total_bytes` 一视同仁）；
  *   - 接收方向：端点一条接收队列，连接一条接收队列（同样带归属）；
  *   - 溢出策略按端点取一个值，作用于该端点队列及其连接队列（ADR-002）。
+ *
+ * **字节记账口径（2026-11-18，N-62）**：
+ *   - 每项按**入队时的 payload 字节**记账（`iocomm_slice.len`，**不含**帧头与 TLV），出队时全额归还；
+ *   - 扇出的 N 个独立项**各记一份**（它们各自持有 payload，不是共享的）；
+ *   - 在途入站帧缓冲（已分配、未入队）记入 `queue_total_bytes`，**不**记入 `queue_budget_bytes`
+ *     （它不属于任何一条队列，也就没有「这条队列」可归）；
+ *   - `max_message_size` 是**整帧**口径（§9.3），与本处的 payload 口径**不同**——两者不可混算。
  *
  * **`connect_async` 未完成时 `conn_destroy`**：此时尚无 conn 句柄可供销毁——
  *   只能用 `runtime_destroy` 或 `runtime_stop`（后者不终止，见下节裁决表）。
@@ -1516,7 +1621,11 @@ typedef struct iocomm_discovery_config {
     uint64_t heartbeat_ms;         /* 0 = 默认 2000 ms */
     uint64_t lease_ms;             /* 0 = 默认 6000 ms（= 3 个心跳周期）；超时即判定离线 */
 
-    /* 单播 seed 列表（组播不可用/跨网段兜底） */
+    /* 单播 seed 列表（组播不可用/跨网段兜底）。
+     * 每项格式 `"<host>:0"` —— **port 必须为 0**（= 对端单播端口未知，由库扫描发现；
+     * 2026-11-18，N-60）。host 为 IPv4 字面量或主机名，解析出多个地址时逐个按 seed 处理。
+     * 非 0 port / 空 host / 解析失败 / 长度 > 255 B → `discovery_start` 返回 `INVALID_ARGUMENT`
+     * （且发现**不启动**）。完整 bootstrap / 稳态 / 重扫规则见 [线格式 §8.1](wire-format.md)。 */
     const char* const* seeds;
     const uint64_t*    seed_lens;
     uint32_t           seed_count;
@@ -1679,9 +1788,22 @@ struct iocomm_peer_status {
  *   - **端点没有自身状态**：回调的 `conn` 与 `ep` **恒非 0**，永不以 `conn == 0` 触发；
  *   - 与消息接收通道**无关**：不受 §6.4 的 `subscribe` / `recv` 二选一约束（矩阵见 §3.2.1）。
  *
- * **是否在订阅建立时立刻推一次当前值**：与**连接级** `iocomm_conn_condition_subscribe` 取**同一口径**——
- * 两级是同一条规则（2026-11-05 复核后再无悬空）。在连接级的该口径写死之前，调用方应先用
- * `iocomm_conn_status` 取初始值、只依赖**变化**推送；AC-121 也只断言变化。
+ * **订阅建立时不补推当前值（2026-11-18 定，N-61；两级同一口径）**：
+ *   `fn` **只在条件集发生变化时**触发；`*_condition_subscribe` 返回前与返回时都**不会**调用 `fn`。
+ *   - **为什么不补推**：① 回调若在注册函数返回前触发，此时 `out_sub` **尚未写出**，回调内无法使用该句柄
+ *     （例如取消自己的订阅）——行业里没有任何库做到「注册函数内同步回调」且「输出句柄在回调期间可用」
+ *     （Boost.Asio 明文禁止：*"the completion handler will not be invoked from within this function"*）；
+ *     ② 端点级订阅的成员是**动态集合**，补推意味着订阅瞬间对全部现有成员各推一次，这不是「变化」语义，
+ *     且成员多时会在订阅点打出一次尖峰。
+ *   - **调用方的正确顺序是「先订阅、后取初值」**（2026-11-18 修正——此前注释建议的是相反顺序，那是错的）：
+ *       1. `*_condition_subscribe(...)`——**保证此后不再漏任何变化**；
+ *       2. 用 `iocomm_conn_status`（或 `diagnostic_dump` 的 `connections[]`）取一次当前值作为基线。
+ *     两步之间发生的变化会**多推一次**（既在初值里、又作为变化推送）。`iocomm_peer_status` 是**全量条件集**，
+ *     重复投递**天然幂等**，无害；反之「先取初值、后订阅」会**永久漏掉**那个窗口内的变化，且本结构体
+ *     **没有序号**可用来去重（见 `open-questions.md` N-61 的「无序号时点」分析）。
+ *     这与 PostgreSQL `LISTEN` 的官方建议同构：*"The first few received notifications might refer to updates
+ *     already observed in the initial database inspection, but this is usually harmless."*
+ *   - AC-12 / AC-121 只断言「变化被推送」，与本口径一致。
  */
 typedef void (*iocomm_condition_fn)(void* user, iocomm_conn_t conn,
                                     iocomm_endpoint_t ep,
@@ -1714,8 +1836,34 @@ struct iocomm_stats {
     uint64_t protocol_errors;      /* 收到 ERROR 帧或判定帧损坏的次数（v1） */
     uint64_t audit_events;         /* 已送交 audit_fn（v1：已写 log_fn 的 AUDIT 类别）的事件数 */
 
-    int64_t  send_queue_depth, recv_queue_depth;
-    int64_t  open_endpoints, discovered_peers;
+    /* 队列水位（2026-11-18，N-55）。**两组都是「瞬时快照」，不是累计值**——
+     * 与同结构体的 `queue_dropped`（累计条数）性质相反，不要混用。
+     *
+     * 四个值都取「**最满的那一条队列**」，**不做跨队列求和**。理由（调研依据见
+     * `open-questions.md` N-55）：本库的发送队列由成员连接**共享**，逐连接读数若是求和
+     * 会把同一队列重复计入；而 `diagnostic_dump` 的 `connections[]` 正是逐连接读数，
+     * 调用方若对它求和就会被放大到 `成员数` 倍。取 max 对共享队列天然幂等。 */
+    int64_t  send_queue_depth;     /* 待发**条数**（不含正在写的项）的最大值，单位 = 条。
+                                    * 队列集合 = 全部端点发送队列 + `ep_owner == 0` 的出站连接各自队列。 */
+    int64_t  recv_queue_depth;     /* 待取**条数**的最大值，单位 = 条。
+                                    * 队列集合 = 全部端点接收队列 + 每连接接收队列 + 无主连接的接收队列。 */
+    int64_t  send_queue_bytes;     /* 待发 **payload 字节**（不含帧头与 TLV，见 §6.1 记账口径）的最大值。
+                                    * 队列集合同 `send_queue_depth`。 */
+    int64_t  recv_queue_bytes;     /* 待取 payload 字节的最大值，集合同 `recv_queue_depth`。 */
+
+    /* ⚠️ **分母不随这些值返回**：四个值来自**可能不同的四条队列**（独立取 max），
+     * 且调用方不知道「最满的那条队列」的 `send_queue_max` / `queue_budget_bytes` 各是多少
+     * （端点的 `queue_limit` 可覆盖全局）。因此**不要**把它们与全局默认值相除算「填充率」。
+     * 需要精确的「某条队列用了多少」时，用 `iocomm_diagnostic_dump` 的 `endpoints[]`（那里逐端点给出
+     * 深度与预算，分母可知）。本组字段的用途是**粗粒度信号**（「现在大概忙不忙」），不是精确分位。
+     *
+     * **条数指标在大消息下会低估压力**：字节上限（`queue_budget_bytes`，默认 64 MiB）先于条数上限
+     * （1024 条）触发时——即**平均消息 > 64 KiB** 时——队列已满而 `*_depth` 仍显示很小的值。
+     * 例：1 MiB 消息填满队列时 `send_queue_depth` 约为 **64**（不是 1024），看起来只用了 6%。判断是否接近满**必须看 `*_bytes`**。 */
+
+    int64_t  open_endpoints;       /* 本 Runtime 当前存活的端点句柄数（含纯出站端点）。 */
+    int64_t  discovered_peers;     /* 当前发现表中**其他 Runtime** 的节点数（不含自己）；混合来源
+                                    * （组播 / seed / 本机注册表）去重后计。 */
 
     /* 延迟（FR-5.4）：基于心跳 RTT 的直方图分位。
      * **inproc 连接不产生样本**（2026-11-11，D-5 / N-58：无心跳即无 RTT）；只有 inproc 连接时三项为 0。 */
@@ -1738,10 +1886,12 @@ int32_t iocomm_stats_snapshot(iocomm_runtime_t rt, iocomm_stats* out,
  *         "last_rx_ns": <u64>, "last_heartbeat_ns": <u64>,
  *         "last_rx_age_ms": <u64>, "last_heartbeat_age_ms": <u64>,   /* 可选键，见下方口径 */
  *         "reconnect_count": <u64>,
- *         "send_queue_depth": <i64>, "recv_queue_depth": <i64>
+ *         "send_queue_depth": <i64>, "recv_queue_depth": <i64>,
+ *         "send_queue_bytes": <i64>, "recv_queue_bytes": <i64>
  *     }, ... ],
  *     "endpoints":   [ { "ep": <u64>, "name": <string>, "conn_count": <u32>,
- *                        "send_queue_depth": <i64> }, ... ] }
+ *                        "send_queue_depth": <i64>, "send_queue_bytes": <i64>,
+ *                        "send_queue_max": <u32>, "queue_budget_bytes": <u64> }, ... ] }
  *
  * **本 dump 是 v1 唯一的「线程安全连接枚举」入口**（2026-11-09，D-2 裁决）：
  *   `conn_count` / `conn_get` 仅限 loop 线程（§3.3、§7），owned 模式下应用线程不可调用；
@@ -1767,6 +1917,16 @@ int32_t iocomm_stats_snapshot(iocomm_runtime_t rt, iocomm_stats* out,
  *   同一端点的所有成员连接报**同一个值**，聚合时**不可相加**；`ep_owner == 0` 的出站连接报**自己**队列的深度。
  *   （2026-11-09，D-2：后一情形此前是观测盲区，随本次补全关闭，见 `open-questions.md` N-47。）
  * - `recv_queue_depth`：**每连接一条**（§6.1），可直接按连接读。
+ * - `send_queue_bytes` / `recv_queue_bytes`（2026-11-18，N-55）：与同名 `*_depth` **一一对应**的
+ *   **payload 字节**读数（不含帧头与 TLV，见 §6.1 记账口径）——同一队列 / 同一连接，`*_bytes` 是 `*_depth` 的字节版。
+ *   与 `*_depth` 的区别只在单位：`connections[]` 里的成员连接同样报其端点共享队列的字节数（**不可相加**）。
+ *   **为什么两者都给**：队列是「条数 + 字节」双约束（§6.0），大消息下条数会严重低估压力——单看 `*_depth`
+ *   会把「已满」读成「6%」。需要判断是否接近上限时**看 `*_bytes` 对 `queue_budget_bytes`**。
+ * - `send_queue_max` / `queue_budget_bytes`（`endpoints[]` 专有，2026-11-18 追加）：该端点发送队列的
+ *   **两个分母**——条数上限与**生效的**字节上限（已按 `endpoint_config.queue_budget_bytes` >
+ *   `tune_config` > `runtime_config` 的优先级解析，N-63）。**这是 `iocomm_stats` 那组取 max 值所缺的分母**
+ *   （见 §8 `iocomm_stats` 注释的「分母不随这些值返回」）——要算某端点的精确填充率，用本 dump。
+ *   **两个值都是该端点的生效值**，不是全局默认值——所以**不要**用 `queue_budget_bytes` 的默认值去算填充率。
  *
  * 键名与类型属**契约**；新增键只允许在顶层与对象内追加（读取方忽略未知键）。
  * **例外（2026-11-05，N-40；2026-11-09，D-2 部分回退）**：`send_queue_depth` 曾从 `connections[]` **移到** `endpoints[]`（属一次性的破坏性字段搬移，本库尚未发布故无兼容负担）；D-2 裁决后在 `connections[]` **恢复同名字段**，两处并存——`endpoints[]` 的仍为端点级唯一值，`connections[]` 的仅是同一队列的逐连接读数（见上方字段口径）。
@@ -1977,6 +2137,10 @@ typedef struct iocomm_monitor_config {
 > **消息尺寸上限**：`max_message_size`（默认 1 MiB）约束**整帧**——`20 + tlv_len + payload_len`
 > （见 [线格式 §1](wire-format.md)），即**发送方可见的 payload 上限比该值小约 20–80 B**。
 > 该值**下限 56 B**（`20` 帧头 + `SEQ`/`TS_SEND`/`SOURCE_NODE` 三项必填 TLV 共 36 B）：低于此值则任何 `DATA` 帧都无法通过校验，`runtime_create` 返回 `INVALID_ARGUMENT`（见 §6.0）。
+> **该值上限 1 GiB**（2026-11-18，N-62）：`runtime_create` / `reconfigure` 越界返回 `INVALID_ARGUMENT`。
+> 它与**队列字节预算完全解耦**——`queue_budget_bytes` 可以小于 `max_message_size`，此时大消息仍能进入**空队列**
+> （见 §6.0「空队列无条件接受一条消息」）。这与线上「本端能收多大帧」（`max_frame_bytes` 协商，[线格式 §5](wire-format.md)）
+> 是同一件事的两种表述：**尺寸协商只受 `max_message_size` 约束，不受队列预算影响**。
 > 在发送侧**先于入队**检查——
 > **同步返回**（`TOO_LARGE` 属于「不可能再回调」的入队前失败，见 §6.2）：
 > 同步 `conn_send` / `endpoint_send` 与异步 `*_send_async` **一律同步返回 `ICOMM_ERR_TOO_LARGE`**，
@@ -2259,6 +2423,16 @@ struct iocomm_audit_record {
 > **不升 `abi_minor`**，与既有 `send_options.queue_timeout_ms` 等保持同一口径。首次发布后任何此类追加一律升 minor。
 > 同批仅改注释/文档、不动布局的：N-04（`node_id` / `state_dir` 语义）、N-05（`connect_node` 解析规则）、
 > N-06（重连语义）、N-07（心跳默认值）。
+
+> **发布前的同批调整（2026-11-18，同样不升 `abi_minor`）**：**N-62 队列字节预算与消息上限解耦**——
+> `runtime_config` 尾部追加 `queue_budget_bytes` / `queue_total_bytes`（`uint64_t`，0 = 默认 64 MiB / 256 MiB）；
+> `tune_config` 尾部追加同名字段（0 = 保持）；**`endpoint_config` 尾部追加 `queue_budget_bytes`**（N-63；0 = 用 runtime 值）；`iocomm_stats` 尾部追加 `send_queue_bytes` / `recv_queue_bytes`
+> （见 §8，N-55）；`diagnostic_dump` 的 JSON 追加同名字节键（JSON 键追加不影响读取方，见 §8 注释）。
+> 同时改**取值约束**（不动布局）：`max_message_size` 上限 **64 MiB → 1 GiB**；队列字节上限停止由
+> `min(queue_max × max_message_size, 64 MiB)` 推导，改为上面两个独立字段。理由与 2026-10-21 / 11-04 同批相同：
+> 尚无兼容宿主。**首次发布后**，本批中四处「结构体尾部追加」（`runtime_config` / `tune_config` / `endpoint_config` / `iocomm_stats`）一律按上表升 `minor`；而两个上限常数
+> （1 GiB / 64 MiB 默认值）属**取值变更**，不构成 ABI 破坏，但会改变既有部署的行为——故与端口迁移（D-4）同口径，
+> 在发布后需写入变更说明。
 
 > **发布前的宏删除（2026-11-04，同样不升 `abi_minor`）**：删除 `ICOMM_ENDPOINT_UNIQUE`——它是**宏**，
 > 不进入任何结构体布局；`endpoint_config.flags` 改为 v1 保留字段（无已定义位，非 0 → `INVALID_ARGUMENT`）。
