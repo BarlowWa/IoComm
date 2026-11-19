@@ -339,7 +339,7 @@ payload 固定 6 B：`reason(u16)` + `reserved(u16)` + `detail(u32)`。
 | 路径 | 机制 | 依据 |
 |---|---|---|
 | **组播接收** | 所有 Runtime 加入同一组播组、绑同一端口，内核按**组播语义把数据报复制给每个 socket** | 组播天然是一对多 |
-| **单播接收**（`CAP_Q` / `CAP_A` / seed） | **每个 Runtime 用独立端口**：在 **`23101..23200`**（100 个）内取第一个可用端口绑定（**不含组播端口 23100**）；向对端查询时，目标端口取对端 `BEACON` 里上报的**实际源端口**（稳态，见下「seed bootstrap」）。**区间用尽** → `discovery_start` 返回 `RESOURCE_EXHAUSTED`（同机 >100 个 Runtime 需拆分主机，或关组播改 seed） | 单播 UDP 在 `SO_REUSEADDR`/`SO_REUSEPORT` 下**不会**复制给所有 socket，会被同机另一个 Runtime 吞掉 |
+| **单播接收**（`CAP_Q` / `CAP_A` / seed） | **每个 Runtime 用独立端口**：在 **`23101..23200`**（100 个）内取第一个可用端口绑定（**不含组播端口 23100**）；向对端查询时，目标端口取对端 `BEACON` 里上报的**实际源端口**（稳态，见下「seed bootstrap」）。**区间用尽** → `discovery_start` 返回 `RESOURCE_EXHAUSTED`。⚠️ **这是宿主机级上限，关组播不释放端口**：走 seed 的一端仍须绑一个单播端口发 `CAP_Q`（bootstrap 规则 1），两条路径占用同一个口池。**同机 >100 个 Runtime 只能拆分主机**——该结论在**同一网络命名空间内**成立：Linux 上分 network namespace 可各得完整一段（但 netns 同时切断组播发现）；Windows 无对应机制，只能分主机（N-65） | 单播 UDP 在 `SO_REUSEADDR`/`SO_REUSEPORT` 下**不会**复制给所有 socket，会被同机另一个 Runtime 吞掉 |
 
 **seed bootstrap（2026-11-18 定，N-60）**：
 
