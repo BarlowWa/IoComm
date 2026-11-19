@@ -1,2 +1,6 @@
 # 调研 / 审计 agent 的落盘报告（不进入版本控制）
 /.tmp_research/
+
+# Python 字节码（ci/check-ac-e6.py 的副作用产物）
+__pycache__/
+*.pyc
