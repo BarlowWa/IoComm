@@ -75,7 +75,7 @@ Server 2016 = build 14393。以下特性在它上面**不可用**：
 | loopback TCP | ✅ | 兜底 |
 | AF_UNIX | ❌ | Server 2019+ 才有 |
 
-> **命名管道优先用 `mio::windows::NamedPipe`**（**mio 0.8 起提供**——已核对 0.8.0 源码含 `sys/windows/named_pipe.rs`，0.7.2 / 0.7.10 无此模块；把 IOCP 转换为就绪模型，可直接接入同一 `Poll`）。**仅在目标 mio 版本不提供或行为不满足时**，才自研 overlapped-IO 实现。
+> **命名管道优先用 `mio::windows::NamedPipe`**（**mio 0.7.2 起就已提供**——2026-11-20 逐版本核对 `raw.githubusercontent.com` 上的源码：`v0.7.2` / `v0.7.10` / `v0.8.0` 的 `src/sys/windows/named_pipe.rs` 均存在，`mio::windows::NamedPipe` 在各版本都公开导出。**原文称「0.7.2 / 0.7.10 无此模块」是错的**。**feature 门在 0.7.6 更名为 `os-ext`，不是 0.8.0**：`v0.7.5` 的 `Cargo.toml` 只有 `os-util = []`；`v0.7.6` 起为 `os-ext = ["os-poll"]`（**即恒需 `os-poll`**），并保留 `os-util = ["os-ext"]` 作兼容别名；`v0.7.6` / `v0.7.10` / `v0.8.0` 的 `lib.rs` 都是 `#[cfg(all(windows, feature = "os-ext"))] pub mod windows`。**⚠️ `0.7.2` / `0.7.3` 在 crates.io 上已 yank**（实测 `crates.io/api/v1/crates/mio/{0.7.2,0.7.3}` 的 `yanked` 均为 `true`），故**实际可用下限是 `0.7.10`**；写 `0.7.2` 只为说明「该模块出现得比 0.8 早」。把 IOCP 转换为就绪模型，可直接接入同一 `Poll`）。**仅在目标 mio 版本不提供或行为不满足时**，才自研 overlapped-IO 实现。
 >
 > **备选自研路径**：`iocomm-transport` 内建 `win_pipe` 模块，用 `CreateNamedPipeW` / `ReadFile` / `WriteFile` + `OVERLAPPED` 自管完成端口（估 800–1200 行 + 测试）。**S2 Spike 先验证 `mio::windows::NamedPipe`：可用则不做自研。**
 > → mio 方案为**主路径**；自研仅作兜底，其工作量已单列为 [架构 §10.4](architecture.md) 的「合计（自研命名管道）」。
@@ -221,5 +221,49 @@ readelf --version-info libiocomm.so | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail 
 |---|---|
 | **RHEL 7 ELS 结束日期** | 两份二手来源矛盾（2026-06 vs 2028-06），**须向 Red Hat 核实** |
 | 麒麟/UOS 的官方支持终止日期 | 无统一公开生命周期表，多为合同项 |
-| 麒麟/UOS 是否提供官方容器镜像 | 未核实 |
+| 麒麟/UOS 是否提供官方容器镜像 | **已核实：两家都有官方 registry**（2026-11-20），详见下方 §7.1 |
 | 国产网卡的 PTP 硬件时间戳支持 | 需逐型号确认 |
+
+### 7.1 麒麟 / UOS 官方容器镜像（2026-11-20 核实）
+
+两家都提供**公开的官方 OCI registry**（前提：CI runner 能访问这两个域名）。**注意**：它们可用作 CI 里的**兼容性冒烟**环境，但**不能**用作发布产物的构建环境——原因见下方「对 CI 的影响」。
+
+**麒麟 — `cr.kylinos.cn`**（Harbor，`Docker-Distribution-Api-Version: registry/2.0`，匿名可读）
+
+公共项目 `kylin` 下按 `V10-SPx` × `架构` 分仓，实测可匿名查询到：
+
+| 仓库 | 架构 | 标签 | 大小 |
+|---|---|---|---|
+| `kylin/kylin-server-v10sp3-x86_64` | `amd64` | `20230324` | 91.9 MiB |
+| `kylin/kylin-server-v10sp3-aarch64` | `arm64` | `20230324` | 90.9 MiB |
+| `kylin/kylin-server-v10sp3-minimal-x86_64` | — | `202404` / `20220812` | 46.9 / 58.9 MiB |
+
+拉取：`docker pull cr.kylinos.cn/kylin/kylin-server-v10sp3-x86_64:20230324`。
+另有 `v10sp1` / `v10sp2` / `loongarch64` 变体、以及带 `-init`（systemd 系初始化）/ `-minimal` / `-micro` 后缀的裁剪版。
+
+**UOS — `registry.uniontech.com`**（Harbor，同样的 `registry/2.0`），门户 `https://uoscr.chinauos.com`
+
+仓库页的 JS 直接给出拉取命令模板 `docker pull registry.uniontech.com/uos-server-base/<repo>:<tag>`；标签与架构数据来自官方接口
+`https://uoscr.chinauos.com/images/tags/uos-server-base/<repo>/`（JSON，实测可匿名取）。`uos-server-base/` 下实测 8 个变体：
+
+| 仓库 | 标签 | 架构 | 压缩后大小 | 多架构 |
+|---|---|---|---|---|
+| `uos-server-20-1070a` | `latest` | **amd64 + arm64** | 206.1 MB | ✅ |
+| `uos-server-20-1070e` | `latest` | **amd64 + arm64** | 303.3 MB | ✅ |
+| `uos-server-20-1070u1a` | `latest` | **amd64 + arm64** | 200.4 MB | ✅ |
+| `uos-server-20-1070u1e` | `latest` | **amd64 + arm64** | 291.2 MB | ✅ |
+| `uos-server-20-1070-loongarch` | `loongarch64` | loong64 | 96.9 MB | — |
+| `uos-server-20-1070-sw` | `sw64` | sw64 | 112.1 MB | — |
+| `uos-server-20-1070u1e-sw64` | `6b` / `8a` | sw64 | 113.3 MB | ✅（同架构多标签） |
+| `uos-server-2510` | `sw64-cui` 等 4 个 | sw64 | 626.7 MB | — |
+
+⚠️ **arm64 以多架构 manifest index 提供，仓库名里不会带 `-arm64`**——按仓库名找 ARM 变体会得到错误结论。
+
+**对 CI 的影响**：
+
+- 麒麟的两条 `v10sp3` 镜像**覆盖了本项目的目标架构**（x86_64 + ARM64）。**但它们不直接满足任何 AC**（见下）。
+- ⚠️ **不能当作发布构建环境**：`AC-E4` 要求产物不含高于 **glibc 2.17** 的符号；麒麟 V10 SP3 的 glibc 为 **2.28**（见本文件 §3.1 的平台表），远高于 2.17，在该容器里出产物会违反 `AC-E4`。正确分工是「**在 2.17 基线上出产物（含 ARM64 交叉编译），麒麟容器只在需要时做兼容性冒烟**」。容器内的实际 glibc 版本**未核实**，使用前须 `ldd --version` 确认。
+- ⚠️ **容器不能替代 `AC-P2` / `AC-P4`**：`AC-P2` 要求「ARM64 构建 + QEMU 全量测试 + **实机**冒烟」，`AC-P4` 要求「麒麟 V10 SP3 / UOS 20 **实机**」。容器是 CI 便利手段，**不构成实机证据**。
+- UOS 侧同样覆盖 **amd64 + arm64**（多架构 index），故架构上不构成缺口；`AC-P4` 本身只要求 x86_64 实机。
+- **未能判定**：两侧镜像**均未实际 `docker pull`**（只经各自官方接口核实了架构、标签与大小），故镜像内的真实 glibc 版本仍须拉取后 `ldd --version` 确认。
+- 镜像为**官方构建**，但这不等于「与实机 OS 完全等价」。用途定位：**CI 里的构建/加载冒烟与依赖解析验证**，不是验收证据来源。
